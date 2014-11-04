@@ -96,6 +96,14 @@
  */
 #define SKIP_PAGES_THRESHOLD	((BlockNumber) 32)
 
+/*
+ * Instead of blindly skipping pages that we can't immediately acquire a
+ * cleanup lock for (assuming we're not freezing), we keep a list of pages we
+ * initially skipped, up to VACUUM_MAX_RETRY_PAGES. We retry those pages at the
+ * end of vacuuming.
+ */
+#define VACUUM_MAX_RETRY_PAGES	512
+
 typedef struct LVRelStats
 {
 	/* hasindex = true means two-pass strategy; false means one-pass */
@@ -428,8 +436,14 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 				blkno;
 	char	   *relname;
 	BlockNumber empty_pages,
-				vacuumed_pages;
-	double		nunused;
+				vacuumed_pages,
+				retry_pages[VACUUM_MAX_RETRY_PAGES];
+	int			retry_pages_insert_ptr;
+	double		retry_page_count,
+				retry_fail_count,
+				retry_pages_skipped,
+				cleanup_lock_waits,
+				nunused;
 	IndexBulkDeleteResult **indstats;
 	int			i;
 	PGRUsage	ru0;
@@ -446,8 +460,8 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 					get_namespace_name(RelationGetNamespace(onerel)),
 					relname)));
 
-	empty_pages = vacuumed_pages = 0;
-	nunused = 0;
+	empty_pages = vacuumed_pages = retry_pages_insert_ptr = retry_page_count =
+		retry_fail_count = retry_pages_skipped = cleanup_lock_waits = nunused = 0;
 
 	indstats = (IndexBulkDeleteResult **)
 		palloc0(nindexes * sizeof(IndexBulkDeleteResult *));
@@ -606,6 +620,19 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 			 */
 			if (!scan_all)
 			{
+				/*
+				 * Remember the page that we're skipping, but only if there's
+				 * still room.
+				 *
+				 * XXX it would be even better if we retried as soon as we
+				 * filled retry_pages, but we should get very few retry pages
+				 * anyway so lets not go overboard.
+				 */
+				if (retry_pages_insert_ptr<VACUUM_MAX_RETRY_PAGES)
+					retry_pages[retry_pages_insert_ptr++] = blkno;
+				else
+					retry_pages_skipped++;
+
 				ReleaseBuffer(buf);
 				continue;
 			}
@@ -630,12 +657,45 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 			}
 			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 			LockBufferForCleanup(buf);
+			cleanup_lock_waits++;
 			/* drop through to normal processing */
 		}
 
 		lazy_scan_page(onerel, vacrelstats, blkno, buf, vmbuffer, frozen,
 						nindexes, all_visible_according_to_vm,
 						&empty_pages, &vacuumed_pages, &nunused);
+	}
+
+	/*
+	 * Make a second attempt to acquire the cleanup lock on pages we skipped.
+	 * Note that we don't have to worry about !scan_all here.
+	 */
+
+	if (retry_pages_insert_ptr)
+	{
+		for (i = 0; i < retry_pages_insert_ptr; i++)
+		{
+			Buffer		buf;
+			blkno = retry_pages[i];
+
+			visibilitymap_pin(onerel, blkno, &vmbuffer);
+
+			buf = ReadBufferExtended(onerel, MAIN_FORKNUM, blkno,
+									 RBM_NORMAL, vac_strategy);
+
+			/* We need buffer cleanup lock so that we can prune HOT chains. */
+			if (ConditionalLockBufferForCleanup(buf))
+			{
+				retry_page_count++;
+
+				lazy_scan_page(onerel, vacrelstats, blkno, buf, vmbuffer, frozen,
+								nindexes, visibilitymap_test(onerel, blkno, &vmbuffer),
+								&empty_pages, &vacuumed_pages, &nunused);
+			} else
+			{
+				retry_fail_count++;
+			}
+		}
 	}
 
 	pfree(frozen);
@@ -685,19 +745,58 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 						RelationGetRelationName(onerel),
 						vacrelstats->tuples_deleted, vacuumed_pages)));
 
-	ereport(elevel,
-			(errmsg("\"%s\": found %.0f removable, %.0f nonremovable row versions in %u out of %u pages",
-					RelationGetRelationName(onerel),
-					vacrelstats->tuples_deleted, vacrelstats->scanned_tuples,
-					vacrelstats->scanned_pages, nblocks),
-			 errdetail("%.0f dead row versions cannot be removed yet.\n"
-					   "There were %.0f unused item pointers.\n"
-					   "%u pages are entirely empty.\n"
-					   "%s.",
-					   vacrelstats->new_dead_tuples,
-					   nunused,
-					   empty_pages,
-					   pg_rusage_show(&ru0))));
+	/*
+	 * Note: Only one of these can be true
+	 */
+	if (retry_page_count)
+		ereport(elevel,
+				(errmsg("\"%s\": found %.0f removable, %.0f nonremovable row versions in %u out of %u pages",
+						RelationGetRelationName(onerel),
+						vacrelstats->tuples_deleted, vacrelstats->scanned_tuples,
+						vacrelstats->scanned_pages, nblocks),
+				 errdetail("%.0f dead row versions cannot be removed yet.\n"
+						   "There were %.0f unused item pointers.\n"
+						   "%u pages are entirely empty.\n"
+						   "Retried cleanup lock on %.0f pages, retry failed on %.0f, skipped retry on %.0f.\n"
+						   "%s.",
+						   vacrelstats->new_dead_tuples,
+						   nunused,
+						   empty_pages,
+						   retry_page_count, retry_fail_count, retry_pages_skipped,
+						   pg_rusage_show(&ru0))
+				 ));
+	else if (cleanup_lock_waits)
+		ereport(elevel,
+				(errmsg("\"%s\": found %.0f removable, %.0f nonremovable row versions in %u out of %u pages",
+						RelationGetRelationName(onerel),
+						vacrelstats->tuples_deleted, vacrelstats->scanned_tuples,
+						vacrelstats->scanned_pages, nblocks),
+				 errdetail("%.0f dead row versions cannot be removed yet.\n"
+						   "There were %.0f unused item pointers.\n"
+						   "%u pages are entirely empty.\n"
+						   "Waited for cleanup lock on %.0f pages.\n"
+						   "%s.",
+						   vacrelstats->new_dead_tuples,
+						   nunused,
+						   empty_pages,
+						   cleanup_lock_waits,
+						   pg_rusage_show(&ru0))
+				 ));
+	else
+		ereport(elevel,
+				(errmsg("\"%s\": found %.0f removable, %.0f nonremovable row versions in %u out of %u pages",
+						RelationGetRelationName(onerel),
+						vacrelstats->tuples_deleted, vacrelstats->scanned_tuples,
+						vacrelstats->scanned_pages, nblocks),
+				 errdetail("%.0f dead row versions cannot be removed yet.\n"
+						   "There were %.0f unused item pointers.\n"
+						   "%u pages are entirely empty.\n"
+						   "%s.",
+						   vacrelstats->new_dead_tuples,
+						   nunused,
+						   empty_pages,
+						   pg_rusage_show(&ru0))
+				 ));
 }
 
 
