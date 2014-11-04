@@ -143,6 +143,10 @@ static void lazy_vacuum_index(Relation indrel,
 static void lazy_cleanup_index(Relation indrel,
 				   IndexBulkDeleteResult *stats,
 				   LVRelStats *vacrelstats);
+static void lazy_scan_page(Relation onerel, LVRelStats *vacrelstats,
+				BlockNumber blkno, Buffer buf, Buffer vmbuffer, xl_heap_freeze_tuple *frozen,
+				int nindexes, bool all_visible_according_to_vm,
+				BlockNumber *empty_pages, BlockNumber *vacuumed_pages, double *nunused);
 static int lazy_vacuum_page(Relation onerel, BlockNumber blkno, Buffer buffer,
 				 int tupindex, LVRelStats *vacrelstats, Buffer *vmbuffer);
 static void lazy_truncate_heap(Relation onerel, LVRelStats *vacrelstats);
@@ -422,14 +426,10 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 {
 	BlockNumber nblocks,
 				blkno;
-	HeapTupleData tuple;
 	char	   *relname;
 	BlockNumber empty_pages,
 				vacuumed_pages;
-	double		num_tuples,
-				tups_vacuumed,
-				nkeep,
-				nunused;
+	double		nunused;
 	IndexBulkDeleteResult **indstats;
 	int			i;
 	PGRUsage	ru0;
@@ -447,7 +447,7 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 					relname)));
 
 	empty_pages = vacuumed_pages = 0;
-	num_tuples = tups_vacuumed = nkeep = nunused = 0;
+	nunused = 0;
 
 	indstats = (IndexBulkDeleteResult **)
 		palloc0(nindexes * sizeof(IndexBulkDeleteResult *));
@@ -508,18 +508,7 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 	for (blkno = 0; blkno < nblocks; blkno++)
 	{
 		Buffer		buf;
-		Page		page;
-		OffsetNumber offnum,
-					maxoff;
-		bool		tupgone,
-					hastup;
-		int			prev_dead_count;
-		int			nfrozen;
-		Size		freespace;
 		bool		all_visible_according_to_vm;
-		bool		all_visible;
-		bool		has_dead_tuples;
-		TransactionId visibility_cutoff_xid = InvalidTransactionId;
 
 		if (blkno == next_not_all_visible_block)
 		{
@@ -644,6 +633,177 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 			/* drop through to normal processing */
 		}
 
+		lazy_scan_page(onerel, vacrelstats, blkno, buf, vmbuffer, frozen,
+						nindexes, all_visible_according_to_vm,
+						&empty_pages, &vacuumed_pages, &nunused);
+	}
+
+	pfree(frozen);
+
+
+	/* now we can compute the new value for pg_class.reltuples */
+	vacrelstats->new_rel_tuples = vac_estimate_reltuples(onerel, false,
+														 nblocks,
+												  vacrelstats->scanned_pages,
+														 vacrelstats->scanned_tuples);
+
+	/*
+	 * Release any remaining pin on visibility map page.
+	 */
+	if (BufferIsValid(vmbuffer))
+	{
+		ReleaseBuffer(vmbuffer);
+		vmbuffer = InvalidBuffer;
+	}
+
+	/* If any tuples need to be deleted, perform final vacuum cycle */
+	/* XXX put a threshold on min number of tuples here? */
+	if (vacrelstats->num_dead_tuples > 0)
+	{
+		/* Log cleanup info before we touch indexes */
+		vacuum_log_cleanup_info(onerel, vacrelstats);
+
+		/* Remove index entries */
+		for (i = 0; i < nindexes; i++)
+			lazy_vacuum_index(Irel[i],
+							  &indstats[i],
+							  vacrelstats);
+		
+		/* Remove tuples from heap */
+		lazy_vacuum_heap(onerel, vacrelstats);
+		vacrelstats->num_index_scans++;
+	}
+
+	/* Do post-vacuum cleanup and statistics update for each index */
+	for (i = 0; i < nindexes; i++)
+		lazy_cleanup_index(Irel[i], indstats[i], vacrelstats);
+
+	/* If no indexes, make log report that lazy_vacuum_heap would've made */
+	if (vacuumed_pages)
+		ereport(elevel,
+				(errmsg("\"%s\": removed %.0f row versions in %u pages",
+						RelationGetRelationName(onerel),
+						vacrelstats->tuples_deleted, vacuumed_pages)));
+
+	ereport(elevel,
+			(errmsg("\"%s\": found %.0f removable, %.0f nonremovable row versions in %u out of %u pages",
+					RelationGetRelationName(onerel),
+					vacrelstats->tuples_deleted, vacrelstats->scanned_tuples,
+					vacrelstats->scanned_pages, nblocks),
+			 errdetail("%.0f dead row versions cannot be removed yet.\n"
+					   "There were %.0f unused item pointers.\n"
+					   "%u pages are entirely empty.\n"
+					   "%s.",
+					   vacrelstats->new_dead_tuples,
+					   nunused,
+					   empty_pages,
+					   pg_rusage_show(&ru0))));
+}
+
+
+/*
+ *	lazy_vacuum_heap() -- second pass over the heap
+ *
+ *		This routine marks dead tuples as unused and compacts out free
+ *		space on their pages.  Pages not having dead tuples recorded from
+ *		lazy_scan_heap are not visited at all.
+ *
+ * Note: the reason for doing this as a second pass is we cannot remove
+ * the tuples until we've removed their index entries, and we want to
+ * process index entry removal in batches as large as possible.
+ */
+static void
+lazy_vacuum_heap(Relation onerel, LVRelStats *vacrelstats)
+{
+	int			tupindex;
+	int			npages;
+	PGRUsage	ru0;
+	Buffer		vmbuffer = InvalidBuffer;
+
+	pg_rusage_init(&ru0);
+	npages = 0;
+
+	tupindex = 0;
+	while (tupindex < vacrelstats->num_dead_tuples)
+	{
+		BlockNumber tblk;
+		Buffer		buf;
+		Page		page;
+		Size		freespace;
+
+		vacuum_delay_point();
+
+		tblk = ItemPointerGetBlockNumber(&vacrelstats->dead_tuples[tupindex]);
+		buf = ReadBufferExtended(onerel, MAIN_FORKNUM, tblk, RBM_NORMAL,
+								 vac_strategy);
+		if (!ConditionalLockBufferForCleanup(buf))
+		{
+			ReleaseBuffer(buf);
+			++tupindex;
+			continue;
+		}
+		tupindex = lazy_vacuum_page(onerel, tblk, buf, tupindex, vacrelstats,
+									&vmbuffer);
+
+		/* Now that we've compacted the page, record its available space */
+		page = BufferGetPage(buf);
+		freespace = PageGetHeapFreeSpace(page);
+
+		UnlockReleaseBuffer(buf);
+		RecordPageWithFreeSpace(onerel, tblk, freespace);
+		npages++;
+	}
+
+	if (BufferIsValid(vmbuffer))
+	{
+		ReleaseBuffer(vmbuffer);
+		vmbuffer = InvalidBuffer;
+	}
+
+	ereport(elevel,
+			(errmsg("\"%s\": removed %d row versions in %d pages",
+					RelationGetRelationName(onerel),
+					tupindex, npages),
+			 errdetail("%s.",
+					   pg_rusage_show(&ru0))));
+}
+/*
+ * lazy_scan_page() - scan a single page for dead tuples
+ *
+ * This is broken out from lazy_scan_heap() so that we can retry cleaning pages
+ * that we couldn't get the cleanup lock on. Caller must have a cleanup lock on
+ * the heap buffer (buf), and have the appropriate visibility map buffer
+ * (vmbuffer) pinned.
+ *
+ */
+static void
+lazy_scan_page(Relation onerel, LVRelStats *vacrelstats,
+				BlockNumber blkno, Buffer buf, Buffer vmbuffer, xl_heap_freeze_tuple *frozen,
+				int nindexes, bool all_visible_according_to_vm,
+				BlockNumber *empty_pages, BlockNumber *vacuumed_pages, double *nunused)
+{
+		int				nfrozen = 0;
+		int				i;
+		Page			page;
+		OffsetNumber 	offnum,
+						maxoff;
+		HeapTupleData 	tuple;
+		bool			all_visible = true;
+		bool			has_dead_tuples = false;
+		bool			hastup = false;
+		bool			tupgone;
+		char	   		*relname = RelationGetRelationName(onerel);
+		Size			freespace;
+		TransactionId	visibility_cutoff_xid = InvalidTransactionId;
+		int				prev_dead_count = vacrelstats->num_dead_tuples;
+
+		/*
+		 * I don't see a way to check onerel against buf or vmbuffer without
+		 * BufferGetTag, which seems like overkill.
+		 */
+		Assert(BufferGetBlockNumber(buf) == blkno);
+		Assert(visibilitymap_pin_ok(blkno, vmbuffer));
+
 		vacrelstats->scanned_pages++;
 
 		page = BufferGetPage(buf);
@@ -687,7 +847,7 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 			UnlockReleaseBuffer(buf);
 
 			RecordPageWithFreeSpace(onerel, blkno, freespace);
-			continue;
+			return;
 		}
 
 		if (PageIsEmpty(page))
@@ -725,7 +885,7 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 
 			UnlockReleaseBuffer(buf);
 			RecordPageWithFreeSpace(onerel, blkno, freespace);
-			continue;
+			return;
 		}
 
 		/*
@@ -733,24 +893,19 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 		 *
 		 * We count tuples removed by the pruning step as removed by VACUUM.
 		 */
-		tups_vacuumed += heap_page_prune(onerel, buf, OldestXmin, false,
+		vacrelstats->tuples_deleted += heap_page_prune(onerel, buf, OldestXmin, false,
 										 &vacrelstats->latestRemovedXid);
 
 		/*
 		 * Now scan the page to collect vacuumable items and check for tuples
 		 * requiring freezing.
 		 */
-		all_visible = true;
-		has_dead_tuples = false;
-		nfrozen = 0;
-		hastup = false;
-		prev_dead_count = vacrelstats->num_dead_tuples;
-		maxoff = PageGetMaxOffsetNumber(page);
 
 		/*
 		 * Note: If you change anything in the loop below, also look at
 		 * heap_page_is_all_visible to see if that needs to be changed.
 		 */
+		maxoff = PageGetMaxOffsetNumber(page);
 		for (offnum = FirstOffsetNumber;
 			 offnum <= maxoff;
 			 offnum = OffsetNumberNext(offnum))
@@ -777,7 +932,7 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 
 			/*
 			 * DEAD item pointers are to be vacuumed normally; but we don't
-			 * count them in tups_vacuumed, else we'd be double-counting (at
+			 * count them in vacrelstats->tuples_deleted, else we'd be double-counting (at
 			 * least in the common case where heap_page_prune() just freed up
 			 * a non-HOT tuple).
 			 */
@@ -817,7 +972,7 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 					 */
 					if (HeapTupleIsHotUpdated(&tuple) ||
 						HeapTupleIsHeapOnly(&tuple))
-						nkeep += 1;
+						vacrelstats->new_dead_tuples += 1;
 					else
 						tupgone = true; /* we can delete the tuple */
 					all_visible = false;
@@ -870,7 +1025,7 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 					 * If tuple is recently deleted then we must not remove it
 					 * from relation.
 					 */
-					nkeep += 1;
+					vacrelstats->new_dead_tuples += 1;
 					all_visible = false;
 					break;
 				case HEAPTUPLE_INSERT_IN_PROGRESS:
@@ -891,12 +1046,12 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 				lazy_record_dead_tuple(vacrelstats, &(tuple.t_self));
 				HeapTupleHeaderAdvanceLatestRemovedXid(tuple.t_data,
 											 &vacrelstats->latestRemovedXid);
-				tups_vacuumed += 1;
+				vacrelstats->tuples_deleted += 1;
 				has_dead_tuples = true;
 			}
 			else
 			{
-				num_tuples += 1;
+				vacrelstats->scanned_tuples += 1;
 				hastup = true;
 
 				/*
@@ -1041,139 +1196,6 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 		 */
 		if (vacrelstats->num_dead_tuples == prev_dead_count)
 			RecordPageWithFreeSpace(onerel, blkno, freespace);
-	}
-
-	pfree(frozen);
-
-	/* save stats for use later */
-	vacrelstats->scanned_tuples = num_tuples;
-	vacrelstats->tuples_deleted = tups_vacuumed;
-	vacrelstats->new_dead_tuples = nkeep;
-
-	/* now we can compute the new value for pg_class.reltuples */
-	vacrelstats->new_rel_tuples = vac_estimate_reltuples(onerel, false,
-														 nblocks,
-												  vacrelstats->scanned_pages,
-														 num_tuples);
-
-	/*
-	 * Release any remaining pin on visibility map page.
-	 */
-	if (BufferIsValid(vmbuffer))
-	{
-		ReleaseBuffer(vmbuffer);
-		vmbuffer = InvalidBuffer;
-	}
-
-	/* If any tuples need to be deleted, perform final vacuum cycle */
-	/* XXX put a threshold on min number of tuples here? */
-	if (vacrelstats->num_dead_tuples > 0)
-	{
-		/* Log cleanup info before we touch indexes */
-		vacuum_log_cleanup_info(onerel, vacrelstats);
-
-		/* Remove index entries */
-		for (i = 0; i < nindexes; i++)
-			lazy_vacuum_index(Irel[i],
-							  &indstats[i],
-							  vacrelstats);
-		/* Remove tuples from heap */
-		lazy_vacuum_heap(onerel, vacrelstats);
-		vacrelstats->num_index_scans++;
-	}
-
-	/* Do post-vacuum cleanup and statistics update for each index */
-	for (i = 0; i < nindexes; i++)
-		lazy_cleanup_index(Irel[i], indstats[i], vacrelstats);
-
-	/* If no indexes, make log report that lazy_vacuum_heap would've made */
-	if (vacuumed_pages)
-		ereport(elevel,
-				(errmsg("\"%s\": removed %.0f row versions in %u pages",
-						RelationGetRelationName(onerel),
-						tups_vacuumed, vacuumed_pages)));
-
-	ereport(elevel,
-			(errmsg("\"%s\": found %.0f removable, %.0f nonremovable row versions in %u out of %u pages",
-					RelationGetRelationName(onerel),
-					tups_vacuumed, num_tuples,
-					vacrelstats->scanned_pages, nblocks),
-			 errdetail("%.0f dead row versions cannot be removed yet.\n"
-					   "There were %.0f unused item pointers.\n"
-					   "%u pages are entirely empty.\n"
-					   "%s.",
-					   nkeep,
-					   nunused,
-					   empty_pages,
-					   pg_rusage_show(&ru0))));
-}
-
-
-/*
- *	lazy_vacuum_heap() -- second pass over the heap
- *
- *		This routine marks dead tuples as unused and compacts out free
- *		space on their pages.  Pages not having dead tuples recorded from
- *		lazy_scan_heap are not visited at all.
- *
- * Note: the reason for doing this as a second pass is we cannot remove
- * the tuples until we've removed their index entries, and we want to
- * process index entry removal in batches as large as possible.
- */
-static void
-lazy_vacuum_heap(Relation onerel, LVRelStats *vacrelstats)
-{
-	int			tupindex;
-	int			npages;
-	PGRUsage	ru0;
-	Buffer		vmbuffer = InvalidBuffer;
-
-	pg_rusage_init(&ru0);
-	npages = 0;
-
-	tupindex = 0;
-	while (tupindex < vacrelstats->num_dead_tuples)
-	{
-		BlockNumber tblk;
-		Buffer		buf;
-		Page		page;
-		Size		freespace;
-
-		vacuum_delay_point();
-
-		tblk = ItemPointerGetBlockNumber(&vacrelstats->dead_tuples[tupindex]);
-		buf = ReadBufferExtended(onerel, MAIN_FORKNUM, tblk, RBM_NORMAL,
-								 vac_strategy);
-		if (!ConditionalLockBufferForCleanup(buf))
-		{
-			ReleaseBuffer(buf);
-			++tupindex;
-			continue;
-		}
-		tupindex = lazy_vacuum_page(onerel, tblk, buf, tupindex, vacrelstats,
-									&vmbuffer);
-
-		/* Now that we've compacted the page, record its available space */
-		page = BufferGetPage(buf);
-		freespace = PageGetHeapFreeSpace(page);
-
-		UnlockReleaseBuffer(buf);
-		RecordPageWithFreeSpace(onerel, tblk, freespace);
-		npages++;
-	}
-
-	if (BufferIsValid(vmbuffer))
-	{
-		ReleaseBuffer(vmbuffer);
-		vmbuffer = InvalidBuffer;
-	}
-
-	ereport(elevel,
-			(errmsg("\"%s\": removed %d row versions in %d pages",
-					RelationGetRelationName(onerel),
-					tupindex, npages),
-			 errdetail("%s.",
-					   pg_rusage_show(&ru0))));
 }
 
 /*
