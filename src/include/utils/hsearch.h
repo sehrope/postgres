@@ -157,4 +157,9 @@ extern int	bitmap_match(const void *key1, const void *key2, Size keysize);
 
 #define oid_hash uint32_hash	/* Remove me eventually */
 
+/*
+ * XXHash hackery
+ */
+extern uint32 PGH32(const void *key, Size keysize);
+
 #endif   /* HSEARCH_H */

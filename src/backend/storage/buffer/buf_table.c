@@ -23,7 +23,7 @@
 
 #include "storage/bufmgr.h"
 #include "storage/buf_internals.h"
-
+#include "utils/hsearch.h" /* For XXHash stuff */
 
 /* entry for buffer lookup hashtable */
 typedef struct
@@ -60,11 +60,12 @@ InitBufTable(int size)
 	info.keysize = sizeof(BufferTag);
 	info.entrysize = sizeof(BufferLookupEnt);
 	info.num_partitions = NUM_BUFFER_PARTITIONS;
+	info.hash = PGH32;
 
 	SharedBufHash = ShmemInitHash("Shared Buffer Lookup Table",
 								  size, size,
 								  &info,
-								  HASH_ELEM | HASH_BLOBS | HASH_PARTITION);
+								  HASH_ELEM | HASH_FUNCTION | HASH_PARTITION);
 }
 
 /*

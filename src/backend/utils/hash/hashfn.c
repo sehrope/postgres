@@ -22,6 +22,7 @@
 #include "postgres.h"
 
 #include "access/hash.h"
+#include "utils/xxhash.h"
 
 
 /*
@@ -65,6 +66,17 @@ uint32_hash(const void *key, Size keysize)
 	Assert(keysize == sizeof(uint32));
 	return DatumGetUInt32(hash_uint32(*((const uint32 *) key)));
 }
+
+/*
+ * XXhash hackery
+ */
+// #define PGH32(input, length) ((uint32 *) XXH32_no_seed(input, (size_t) length));
+uint32
+PGH32(const void *key, Size keysize)
+{
+	return (uint32) XXH32_no_seed(key, (size_t) keysize);
+}
+
 
 /*
  * bitmap_hash: hash function for keys that are (pointers to) Bitmapsets
