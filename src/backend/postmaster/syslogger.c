@@ -1233,7 +1233,7 @@ pipeThread(void *arg)
 		{
 			if (ftell(syslogFile) >= Log_RotationSize * 1024L ||
 				(csvlogFile != NULL && ftell(csvlogFile) >= Log_RotationSize * 1024L) ||
-				(jsonlogFile != NULL && ftell(jsonlogFIle) >= Log_RotationSize * 1024L))
+				(jsonlogFile != NULL && ftell(jsonlogFile) >= Log_RotationSize * 1024L))
 				SetLatch(MyLatch);
 		}
 		LeaveCriticalSection(&sysloggerSection);
