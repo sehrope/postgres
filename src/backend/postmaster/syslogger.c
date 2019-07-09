@@ -1157,7 +1157,7 @@ write_syslogger_file(const char *buffer, int count, int destination)
 	 * failure in that would lead to recursion.
 	 */
 	if (destination == LOG_DESTINATION_CSVLOG && csvlogFile != NULL)
-		logfile = syslogFile;
+		logfile = csvlogFile;
 	else if (destination == LOG_DESTINATION_JSONLOG && jsonlogFile != NULL)
 		logfile = jsonlogFile;
 	else
