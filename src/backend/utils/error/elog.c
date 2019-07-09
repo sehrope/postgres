@@ -2833,6 +2833,8 @@ write_csvlog(ErrorData *edata)
 static void
 appendJSONKeyValue(StringInfo buf, const char *key, const char *value)
 {
+	if (value == NULL)
+		return;
 	appendStringInfoChar(buf, ',');
 	escape_json(buf, key);
 	appendStringInfoChar(buf, ':');
