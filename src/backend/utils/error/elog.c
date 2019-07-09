@@ -3046,7 +3046,7 @@ write_jsonlog(ErrorData *edata)
 		appendJSONKeyValueAsUInt(&buf, "internal_position", edata->internalpos);
 
 	/* errcontext */
-	if (!edata->hide_ctx)
+	if (edata->context && !edata->hide_ctx)
 		appendJSONKeyValue(&buf, "errcontext", edata->context);
 
 	/* user query --- only reported if not disabled by the caller */
