@@ -958,6 +958,7 @@ process_pipe_input(char *logbuffer, int *bytes_in_logbuffer)
 			p.pid != 0 &&
 			(p.is_last == 't' || p.is_last == 'f') &&
 			(p.dest == LOG_DESTINATION_CSVLOG ||
+			 p.dest == LOG_DESTINATION_JSONLOG ||
 			 p.dest == LOG_DESTINATION_STDERR))
 		{
 			List	   *buffer_list;
@@ -1156,9 +1157,9 @@ write_syslogger_file(const char *buffer, int count, int destination)
 	 * Think not to improve this by trying to open logFile on-the-fly.  Any
 	 * failure in that would lead to recursion.
 	 */
-	if (destination == LOG_DESTINATION_CSVLOG && csvlogFile != NULL)
+	if ((destination & LOG_DESTINATION_CSVLOG) && csvlogFile != NULL)
 		logfile = csvlogFile;
-	else if (destination == LOG_DESTINATION_JSONLOG && jsonlogFile != NULL)
+	else if ((destination & LOG_DESTINATION_JSONLOG) && jsonlogFile != NULL)
 		logfile = jsonlogFile;
 	else
 		logfile = syslogFile;
