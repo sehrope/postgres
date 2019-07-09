@@ -973,7 +973,7 @@ process_pipe_input(char *logbuffer, int *bytes_in_logbuffer)
 				break;
 
 			dest = (p.is_last == 'T' || p.is_last == 'F') ?
-				LOG_DESTINATION_CSVLOG : LOG_DESTINATION_STDERR;
+				(LOG_DESTINATION_CSVLOG | LOG_DESTINATION_JSONLOG) : LOG_DESTINATION_STDERR;
 
 			/* Locate any existing buffer for this source pid */
 			buffer_list = buffer_lists[p.pid % NBUFFER_LISTS];
@@ -1159,9 +1159,9 @@ write_syslogger_file(const char *buffer, int count, int destination)
 	 * Think not to improve this by trying to open logFile on-the-fly.  Any
 	 * failure in that would lead to recursion.
 	 */
-	if (destination == LOG_DESTINATION_CSVLOG && csvlogFile != NULL)
+	if ((destination & LOG_DESTINATION_CSVLOG) && csvlogFile != NULL)
 		logfile = csvlogFile;
-	else if (destination == LOG_DESTINATION_JSONLOG && jsonlogFile != NULL)
+	else if ((destination & LOG_DESTINATION_JSONLOG) && jsonlogFile != NULL)
 		logfile = jsonlogFile;
 	else
 		logfile = syslogFile;
