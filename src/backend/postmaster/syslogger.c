@@ -878,7 +878,6 @@ process_pipe_input(char *logbuffer, int *bytes_in_logbuffer)
 {
 	char	   *cursor = logbuffer;
 	int			count = *bytes_in_logbuffer;
-	int			dest = LOG_DESTINATION_STDERR;
 
 	/* While we have enough for a header, process data... */
 	while (count >= (int) (offsetof(PipeProtoHeader, data) + 1))
@@ -891,8 +890,9 @@ process_pipe_input(char *logbuffer, int *bytes_in_logbuffer)
 		if (p.nuls[0] == '\0' && p.nuls[1] == '\0' &&
 			p.len > 0 && p.len <= PIPE_MAX_PAYLOAD &&
 			p.pid != 0 &&
-			(p.is_last == 't' || p.is_last == 'f' ||
-			 p.is_last == 'T' || p.is_last == 'F'))
+			(p.is_last == 't' || p.is_last == 'f') &&
+			(p.dest == LOG_DESTINATION_CSVLOG ||
+			 p.dest == LOG_DESTINATION_STDERR))
 		{
 			List	   *buffer_list;
 			ListCell   *cell;
@@ -905,9 +905,6 @@ process_pipe_input(char *logbuffer, int *bytes_in_logbuffer)
 			/* Fall out of loop if we don't have the whole chunk yet */
 			if (count < chunklen)
 				break;
-
-			dest = (p.is_last == 'T' || p.is_last == 'F') ?
-				LOG_DESTINATION_CSVLOG : LOG_DESTINATION_STDERR;
 
 			/* Locate any existing buffer for this source pid */
 			buffer_list = buffer_lists[p.pid % NBUFFER_LISTS];
@@ -924,7 +921,7 @@ process_pipe_input(char *logbuffer, int *bytes_in_logbuffer)
 					free_slot = buf;
 			}
 
-			if (p.is_last == 'f' || p.is_last == 'F')
+			if (p.is_last == 'f')
 			{
 				/*
 				 * Save a complete non-final chunk in a per-pid buffer
@@ -970,7 +967,7 @@ process_pipe_input(char *logbuffer, int *bytes_in_logbuffer)
 					appendBinaryStringInfo(str,
 										   cursor + PIPE_HEADER_SIZE,
 										   p.len);
-					write_syslogger_file(str->data, str->len, dest);
+					write_syslogger_file(str->data, str->len, p.dest);
 					/* Mark the buffer unused, and reclaim string storage */
 					existing_slot->pid = 0;
 					pfree(str->data);
@@ -979,7 +976,7 @@ process_pipe_input(char *logbuffer, int *bytes_in_logbuffer)
 				{
 					/* The whole message was one chunk, evidently. */
 					write_syslogger_file(cursor + PIPE_HEADER_SIZE, p.len,
-										 dest);
+										 p.dest);
 				}
 			}
 
