@@ -2991,7 +2991,7 @@ write_jsonlog(ErrorData *edata)
 	appendJSONKeyValueFmt(&buf, "session_id", "%lx.%x", (long) MyStartTime, MyProcPid);
 
 	/* Line number */
-	appendJSONKeyValueAsLong(&buf, "line_number", log_line_number);
+	appendJSONKeyValueAsLong(&buf, "line_num", log_line_number);
 
 	/* PS display */
 	if (MyProcPort)
