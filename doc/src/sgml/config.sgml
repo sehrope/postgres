@@ -6678,30 +6678,31 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
 <programlisting>
         {
             "timestamp": time stamp with milliseconds,
-            "username": user name,
+            "user": user name,
             "dbname": database name,
             "pid": process ID,
             "remote_host": client host
             "remote_port": port number,
             "session_id": session ID,
-            "line": per-session line number,
-            "command_tab": command tag,
+            "line_num": per-session line number,
+            "ps": current ps display,
             "session_start": session start time,
             "vxid": virtual transaction ID,
             "txid": regular transaction ID,
             "error_severity": error severity,
             "state_code": SQLSTATE code,
-            "error_message": error message,
-            "error_message_detail": error message detail,
+            "detail": error message detail,
             "hint": hint,
             "internal_query": internal query that led to the error (if any),
-            "character_count": character count of the error position therein,
+            "internal_position": cursor index into internalquery,
             "context": error context,
-            "user_query": user query that led to the error (if any and enabled by
-             <varname>log_min_error_statement</varname>),
-             "location": location of the error in the PostgreSQL source code
-             (if <varname>log_error_verbosity</varname> is set to <literal>verbose</literal>),
-             "application_name: application name
+            "statement": client supplied query string,
+            "cursor_position": cursor index into query string,
+            "func_name": error location function name,
+            "file_name": error location file name,
+            "file_line_num": error location file line number,
+            "application_name": client application name,
+            "message": error message
         }
 </programlisting>
        </para>
