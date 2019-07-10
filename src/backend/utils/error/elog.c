@@ -3030,10 +3030,6 @@ write_jsonlog(ErrorData *edata)
 	if (edata->sqlerrcode)
 		appendJSONKeyValue(&buf, "state_code", unpack_sql_state(edata->sqlerrcode));
 
-	/* errmessage */
-	if (edata->message)
-		appendJSONKeyValue(&buf, "error_message", edata->message);
-
 	/* errdetail or error_detail log */
 	if (edata->detail_log)
 		appendJSONKeyValue(&buf, "detail_log", edata->detail_log);
