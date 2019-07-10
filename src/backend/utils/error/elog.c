@@ -3089,7 +3089,10 @@ write_pipe_chunks(char *data, int len, int dest)
 	/* write all but the last chunk */
 	while (len > PIPE_MAX_PAYLOAD)
 	{
-		p.proto.is_last = (dest == LOG_DESTINATION_CSVLOG ? 'F' : 'f');
+		if (dest == LOG_DESTINATION_CSVLOG)
+			p.proto.is_last = PIPE_DEST_CSVLOG_PART;
+		else
+			p.proto.is_last = PIPE_DEST_STDERR_PART;
 		p.proto.len = PIPE_MAX_PAYLOAD;
 		memcpy(p.proto.data, data, PIPE_MAX_PAYLOAD);
 		rc = write(fd, &p, PIPE_HEADER_SIZE + PIPE_MAX_PAYLOAD);
@@ -3099,7 +3102,10 @@ write_pipe_chunks(char *data, int len, int dest)
 	}
 
 	/* write the last chunk */
-	p.proto.is_last = (dest == LOG_DESTINATION_CSVLOG ? 'T' : 't');
+	if (dest == LOG_DESTINATION_CSVLOG)
+		p.proto.is_last = PIPE_DEST_CSVLOG_LAST;
+	else
+		p.proto.is_last = PIPE_DEST_STDERR_LAST;
 	p.proto.len = len;
 	memcpy(p.proto.data, data, len);
 	rc = write(fd, &p, PIPE_HEADER_SIZE + len);

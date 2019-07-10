@@ -46,8 +46,7 @@ typedef struct
 	char		nuls[2];		/* always \0\0 */
 	uint16		len;			/* size of this chunk (counts data only) */
 	int32		pid;			/* writer's pid */
-	char		is_last;		/* last chunk of message? 't' or 'f' ('T' or
-								 * 'F' for CSV case) */
+	char		is_last;		/* see PIPE_DEST_ constants */
 	char		data[FLEXIBLE_ARRAY_MEMBER];	/* data payload starts here */
 } PipeProtoHeader;
 
@@ -60,6 +59,17 @@ typedef union
 #define PIPE_HEADER_SIZE  offsetof(PipeProtoHeader, data)
 #define PIPE_MAX_PAYLOAD  ((int) (PIPE_CHUNK_SIZE - PIPE_HEADER_SIZE))
 
+/*
+ * Possible values for PipeProtoHeader.is_last to identify the log
+ * destination and whether the message is complete.
+ *
+ * Values suffixed by _PART indicate a partial chunk of a message.
+ * Values suffxied by _LAST indicate the last chunk of a message.
+ */
+#define PIPE_DEST_STDERR_PART	'f'
+#define PIPE_DEST_STDERR_LAST	't'
+#define PIPE_DEST_CSVLOG_PART	'F'
+#define PIPE_DEST_CSVLOG_LAST	'T'
 
 /* GUC options */
 extern bool Logging_collector;

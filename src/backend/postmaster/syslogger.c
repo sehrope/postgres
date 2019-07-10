@@ -892,8 +892,8 @@ process_pipe_input(char *logbuffer, int *bytes_in_logbuffer)
 		if (p.nuls[0] == '\0' && p.nuls[1] == '\0' &&
 			p.len > 0 && p.len <= PIPE_MAX_PAYLOAD &&
 			p.pid != 0 &&
-			(p.is_last == 't' || p.is_last == 'f' ||
-			 p.is_last == 'T' || p.is_last == 'F'))
+			(p.is_last == PIPE_DEST_STDERR_LAST || p.is_last == PIPE_DEST_STDERR_PART ||
+			 p.is_last == PIPE_DEST_CSVLOG_LAST || p.is_last == PIPE_DEST_CSVLOG_PART))
 		{
 			List	   *buffer_list;
 			ListCell   *cell;
@@ -907,8 +907,10 @@ process_pipe_input(char *logbuffer, int *bytes_in_logbuffer)
 			if (count < chunklen)
 				break;
 
-			dest = (p.is_last == 'T' || p.is_last == 'F') ?
-				LOG_DESTINATION_CSVLOG : LOG_DESTINATION_STDERR;
+			if (p.is_last == PIPE_DEST_CSVLOG_LAST || p.is_last == PIPE_DEST_CSVLOG_PART)
+				dest = LOG_DESTINATION_CSVLOG;
+			else
+				dest = LOG_DESTINATION_STDERR;
 
 			/* Locate any existing buffer for this source pid */
 			buffer_list = buffer_lists[p.pid % NBUFFER_LISTS];
@@ -925,7 +927,8 @@ process_pipe_input(char *logbuffer, int *bytes_in_logbuffer)
 					free_slot = buf;
 			}
 
-			if (p.is_last == 'f' || p.is_last == 'F')
+			if (p.is_last == PIPE_DEST_CSVLOG_PART ||
+				p.is_last == PIPE_DEST_STDERR_PART)
 			{
 				/*
 				 * Save a complete non-final chunk in a per-pid buffer
