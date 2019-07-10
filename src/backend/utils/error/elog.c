@@ -2953,8 +2953,13 @@ write_jsonlog(ErrorData *edata)
 	/* Initialize string */
 	appendStringInfoChar(&buf, '{');
 
-	/* Timestamp with milliseconds */
-	setup_formatted_log_time();
+	/*
+	 * timestamp with milliseconds
+	 *
+	 * Check if the timestamp is already calculated for the syslog message,
+	 * and use it if so.  Otherwise, get the current timestamp.  This is done
+	 * to put same timestamp in both syslog and jsonlog messages.
+	 */
 	if (formatted_log_time[0] == '\0')
 		setup_formatted_log_time();
 
