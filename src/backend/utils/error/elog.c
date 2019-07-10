@@ -3019,7 +3019,7 @@ write_jsonlog(ErrorData *edata)
 		appendJSONKeyValueFmt(&buf, "vxid", "%d/%u", MyProc->backendId, MyProc->lxid);
 
 	/* Transaction id */
-	appendJSONKeyValueAsUInt(&buf, "txid", GetTopTransactionIdIfAny());
+	appendJSONKeyValueFmt(&buf, "txid", "%u", GetTopTransactionIdIfAny());
 
 	/* Error severity */
 	if (edata->elevel)
