@@ -879,21 +879,22 @@ process_pipe_input(char *logbuffer, int *bytes_in_logbuffer)
 {
 	char	   *cursor = logbuffer;
 	int			count = *bytes_in_logbuffer;
-	int			dest = LOG_DESTINATION_STDERR;
 
 	/* While we have enough for a header, process data... */
 	while (count >= (int) (offsetof(PipeProtoHeader, data) + 1))
 	{
 		PipeProtoHeader p;
 		int			chunklen;
+		int 		dest;
 
 		/* Do we have a valid header? */
 		memcpy(&p, cursor, offsetof(PipeProtoHeader, data));
+		dest = p.dest_last & ~PIPE_MESSAGE_IS_LAST;
 		if (p.nuls[0] == '\0' && p.nuls[1] == '\0' &&
 			p.len > 0 && p.len <= PIPE_MAX_PAYLOAD &&
 			p.pid != 0 &&
-			(p.is_last == 't' || p.is_last == 'f' ||
-			 p.is_last == 'T' || p.is_last == 'F'))
+			(dest == LOG_DESTINATION_CSVLOG ||
+			 dest == LOG_DESTINATION_STDERR))
 		{
 			List	   *buffer_list;
 			ListCell   *cell;
@@ -906,9 +907,6 @@ process_pipe_input(char *logbuffer, int *bytes_in_logbuffer)
 			/* Fall out of loop if we don't have the whole chunk yet */
 			if (count < chunklen)
 				break;
-
-			dest = (p.is_last == 'T' || p.is_last == 'F') ?
-				LOG_DESTINATION_CSVLOG : LOG_DESTINATION_STDERR;
 
 			/* Locate any existing buffer for this source pid */
 			buffer_list = buffer_lists[p.pid % NBUFFER_LISTS];
@@ -925,7 +923,7 @@ process_pipe_input(char *logbuffer, int *bytes_in_logbuffer)
 					free_slot = buf;
 			}
 
-			if (p.is_last == 'f' || p.is_last == 'F')
+			if (!(p.dest_last & PIPE_MESSAGE_IS_LAST))
 			{
 				/*
 				 * Save a complete non-final chunk in a per-pid buffer
