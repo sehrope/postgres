@@ -2932,7 +2932,6 @@ static void
 write_jsonlog(ErrorData *edata)
 {
 	StringInfoData	buf;
-	bool			print_stmt = false;
 
 	/* static counter for line numbers */
 	static long	log_line_number = 0;
@@ -3056,11 +3055,11 @@ write_jsonlog(ErrorData *edata)
 	if (is_log_level_output(edata->elevel, log_min_error_statement) &&
 		debug_query_string != NULL &&
 		!edata->hide_stmt)
-		print_stmt = true;
-	if (print_stmt)
+	{
 		appendJSONKeyValue(&buf, "statement", debug_query_string);
-	if (print_stmt && edata->cursorpos > 0)
-		appendJSONKeyValueAsInt(&buf, "cursor_position", edata->cursorpos);
+		if (edata->cursorpos > 0)
+			appendJSONKeyValueAsInt(&buf, "cursor_position", edata->cursorpos);
+	}
 
 	/* file error location */
 	if (Log_error_verbosity >= PGERROR_VERBOSE)
