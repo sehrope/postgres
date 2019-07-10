@@ -3064,15 +3064,13 @@ write_jsonlog(ErrorData *edata)
 	/* file error location */
 	if (Log_error_verbosity >= PGERROR_VERBOSE)
 	{
-		if (edata->funcname && edata->filename)
-			appendJSONKeyValueFmt(&buf, "file_location", "%s, %s:%d",
-							 edata->funcname, edata->filename,
-							 edata->lineno);
-		else if (edata->filename)
-			appendJSONKeyValueFmt(&buf, "file_location", "%s:%d",
-							 edata->filename, edata->lineno);
-		else
-			appendJSONKeyValue(&buf, "file_location", "");
+		if (edata->funcname)
+			appendJSONKeyValue(&buf, "func_name", edata->funcname);
+		if (edata->filename)
+		{
+			appendJSONKeyValue(&buf, "file_name", edata->filename);
+			appendJSONKeyValue(&buf, "file_line_num", edata->lineno);
+		}
 	}
 
 	/* Application name */
