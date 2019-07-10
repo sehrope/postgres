@@ -3032,7 +3032,7 @@ write_jsonlog(ErrorData *edata)
 
 	/* errdetail or error_detail log */
 	if (edata->detail_log)
-		appendJSONKeyValue(&buf, "detail_log", edata->detail_log);
+		appendJSONKeyValue(&buf, "detail", edata->detail_log);
 	else if (edata->detail)
 		appendJSONKeyValue(&buf, "detail", edata->detail);
 
@@ -3050,7 +3050,7 @@ write_jsonlog(ErrorData *edata)
 
 	/* errcontext */
 	if (edata->context && !edata->hide_ctx)
-		appendJSONKeyValue(&buf, "errcontext", edata->context);
+		appendJSONKeyValue(&buf, "context", edata->context);
 
 	/* user query --- only reported if not disabled by the caller */
 	if (is_log_level_output(edata->elevel, log_min_error_statement) &&
