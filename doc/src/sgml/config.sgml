@@ -5382,7 +5382,7 @@ SELECT * FROM parent WHERE key = 2400;
        </para>
        <para>
         If <systemitem>jsonlog</systemitem> is included in <varname>log_destination</varname>,
-        log entries are output in <acronym>CSV</acronym> format, which is convenient for
+        log entries are output in <acronym>JSON</acronym> format, which is convenient for
         loading logs into programs.
         See <xref linkend="runtime-config-logging-jsonlog"/> for details.
         <xref linkend="guc-logging-collector"/> must be enabled to generate
