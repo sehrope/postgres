@@ -15,6 +15,19 @@
 #define BLOCK_H
 
 /*
+ * SegmentNumber:
+ *
+ * each data file (heap or index) is divided into segments. The first
+ * segment's file name is the same as the filenode; subsequent segments
+ * are named filenode.1, filenode.2, etc.
+ *
+ * the access methods, the buffer manager and the storage manager are
+ * more or less the only pieces of code that should be accessing disk
+ * segments directly.
+ */
+typedef uint32 SegmentNumber;
+
+/*
  * BlockNumber:
  *
  * each data file (heap or index) is divided into postgres disk blocks

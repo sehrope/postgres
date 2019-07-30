@@ -2144,6 +2144,7 @@ SecBufferDesc
 SecLabelItem
 SecLabelStmt
 SeenRelsEntry
+SegmentNumber
 SelectStmt
 Selectivity
 SemTPadded

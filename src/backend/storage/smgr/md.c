@@ -82,7 +82,7 @@
 typedef struct _MdfdVec
 {
 	File		mdfd_vfd;		/* fd number in fd.c's pool */
-	BlockNumber mdfd_segno;		/* segment number, from 0 */
+	SegmentNumber mdfd_segno;		/* segment number, from 0 */
 } MdfdVec;
 
 static MemoryContext MdCxt;		/* context for all MdfdVec objects */
@@ -125,16 +125,16 @@ static MdfdVec *mdopenfork(SMgrRelation reln, ForkNumber forknum, int behavior);
 static void register_dirty_segment(SMgrRelation reln, ForkNumber forknum,
 								   MdfdVec *seg);
 static void register_unlink_segment(RelFileNodeBackend rnode, ForkNumber forknum,
-									BlockNumber segno);
+									SegmentNumber segno);
 static void register_forget_request(RelFileNodeBackend rnode, ForkNumber forknum,
-									BlockNumber segno);
+									SegmentNumber segno);
 static void _fdvec_resize(SMgrRelation reln,
 						  ForkNumber forknum,
 						  int nseg);
 static char *_mdfd_segpath(SMgrRelation reln, ForkNumber forknum,
-						   BlockNumber segno);
+						   SegmentNumber segno);
 static MdfdVec *_mdfd_openseg(SMgrRelation reln, ForkNumber forkno,
-							  BlockNumber segno, int oflags);
+							  SegmentNumber segno, int oflags);
 static MdfdVec *_mdfd_getseg(SMgrRelation reln, ForkNumber forkno,
 							 BlockNumber blkno, bool skipFsync, int behavior);
 static BlockNumber _mdnblocks(SMgrRelation reln, ForkNumber forknum,
@@ -343,7 +343,7 @@ mdunlinkfork(RelFileNodeBackend rnode, ForkNumber forkNum, bool isRedo)
 	if (ret >= 0)
 	{
 		char	   *segpath = (char *) palloc(strlen(path) + 12);
-		BlockNumber segno;
+		SegmentNumber segno;
 
 		/*
 		 * Note that because we loop until getting ENOENT, we will correctly
@@ -740,7 +740,7 @@ mdnblocks(SMgrRelation reln, ForkNumber forknum)
 {
 	MdfdVec    *v = mdopenfork(reln, forknum, EXTENSION_FAIL);
 	BlockNumber nblocks;
-	BlockNumber segno = 0;
+	SegmentNumber segno = 0;
 
 	/* mdopen has opened the first segment */
 	Assert(reln->md_num_open_segs[forknum] > 0);
@@ -950,7 +950,7 @@ register_dirty_segment(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
  */
 static void
 register_unlink_segment(RelFileNodeBackend rnode, ForkNumber forknum,
-						BlockNumber segno)
+						SegmentNumber segno)
 {
 	FileTag		tag;
 
@@ -967,7 +967,7 @@ register_unlink_segment(RelFileNodeBackend rnode, ForkNumber forknum,
  */
 static void
 register_forget_request(RelFileNodeBackend rnode, ForkNumber forknum,
-						BlockNumber segno)
+						SegmentNumber segno)
 {
 	FileTag		tag;
 
@@ -1068,7 +1068,7 @@ _fdvec_resize(SMgrRelation reln,
  * returned string is palloc'd.
  */
 static char *
-_mdfd_segpath(SMgrRelation reln, ForkNumber forknum, BlockNumber segno)
+_mdfd_segpath(SMgrRelation reln, ForkNumber forknum, SegmentNumber segno)
 {
 	char	   *path,
 			   *fullpath;
@@ -1091,7 +1091,7 @@ _mdfd_segpath(SMgrRelation reln, ForkNumber forknum, BlockNumber segno)
  * and make a MdfdVec object for it.  Returns NULL on failure.
  */
 static MdfdVec *
-_mdfd_openseg(SMgrRelation reln, ForkNumber forknum, BlockNumber segno,
+_mdfd_openseg(SMgrRelation reln, ForkNumber forknum, SegmentNumber segno,
 			  int oflags)
 {
 	MdfdVec    *v;
@@ -1135,8 +1135,8 @@ _mdfd_getseg(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			 bool skipFsync, int behavior)
 {
 	MdfdVec    *v;
-	BlockNumber targetseg;
-	BlockNumber nextsegno;
+	SegmentNumber targetseg;
+	SegmentNumber nextsegno;
 
 	/* some way to handle non-existent segments needs to be specified */
 	Assert(behavior &

@@ -1368,7 +1368,7 @@ sendFile(const char *readfilename, const char *tarfilename, struct stat *statbuf
 	char	   *page;
 	size_t		pad;
 	PageHeader	phdr;
-	int			segmentno = 0;
+	SegmentNumber		segmentno = 0;
 	char	   *segmentpath;
 	bool		verify_checksum = false;
 

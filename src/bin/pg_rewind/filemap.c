@@ -25,7 +25,7 @@ filemap_t  *filemap = NULL;
 
 static bool isRelDataFile(const char *path);
 static char *datasegpath(RelFileNode rnode, ForkNumber forknum,
-						 BlockNumber segno);
+						 SegmentNumber segno);
 static int	path_cmp(const void *a, const void *b);
 static int	final_filemap_cmp(const void *a, const void *b);
 static void filemap_list_to_array(filemap_t *map);
@@ -760,7 +760,7 @@ isRelDataFile(const char *path)
  * The returned path is palloc'd
  */
 static char *
-datasegpath(RelFileNode rnode, ForkNumber forknum, BlockNumber segno)
+datasegpath(RelFileNode rnode, ForkNumber forknum, SegmentNumber segno)
 {
 	char	   *path;
 	char	   *segpath;
