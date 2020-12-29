@@ -15,7 +15,7 @@
 
 #include <ctype.h>
 
-#include "common/hex_decode.h"
+#include "common/hex.h"
 #include "mb/pg_wchar.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
