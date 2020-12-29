@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
- * hex_decode.c
- *		hex decoding
+ * hex.c
+ *		hex processing
  *
  *
  * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
@@ -9,7 +9,7 @@
  *
  *
  * IDENTIFICATION
- *	  src/common/hex_decode.c
+ *	  src/common/hex.c
  *
  *-------------------------------------------------------------------------
  */
@@ -26,7 +26,7 @@
 #else
 #include "mb/pg_wchar.h"
 #endif
-#include "common/hex_decode.h"
+#include "common/hex.h"
 
 
 static const int8 hexlookup[128] = {
