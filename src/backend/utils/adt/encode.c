@@ -15,7 +15,7 @@
 
 #include <ctype.h>
 
-#include "common/hex_decode.h"
+#include "common/hex.h"
 #include "mb/pg_wchar.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
@@ -140,38 +140,6 @@ binary_decode(PG_FUNCTION_ARGS)
 	PG_RETURN_BYTEA_P(result);
 }
 
-
-/*
- * HEX
- */
-
-static const char hextbl[] = "0123456789abcdef";
-
-uint64
-hex_encode(const char *src, size_t len, char *dst)
-{
-	const char *end = src + len;
-
-	while (src < end)
-	{
-		*dst++ = hextbl[(*src >> 4) & 0xF];
-		*dst++ = hextbl[*src & 0xF];
-		src++;
-	}
-	return (uint64) len * 2;
-}
-
-static uint64
-hex_enc_len(const char *src, size_t srclen)
-{
-	return (uint64) srclen << 1;
-}
-
-static uint64
-hex_dec_len(const char *src, size_t srclen)
-{
-	return (uint64) srclen >> 1;
-}
 
 /*
  * BASE64
