@@ -17,7 +17,7 @@
 #include "libpq/pqformat.h"
 #include "mb/pg_wchar.h"
 #include "replication/backup_manifest.h"
-#include "utils/builtins.h"
+#include "common/hex.h"
 #include "utils/json.h"
 
 static void AppendStringToManifest(backup_manifest_info *manifest, char *s);

@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
- * hex_decode.c
- *		hex decoding
+ * hex.c
+ *		hex processing
  *
  *
  * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
@@ -9,7 +9,7 @@
  *
  *
  * IDENTIFICATION
- *	  src/common/hex_decode.c
+ *	  src/common/hex.c
  *
  *-------------------------------------------------------------------------
  */
@@ -26,7 +26,7 @@
 #else
 #include "mb/pg_wchar.h"
 #endif
-#include "common/hex_decode.h"
+#include "common/hex.h"
 
 
 static const int8 hexlookup[128] = {
@@ -39,6 +39,26 @@ static const int8 hexlookup[128] = {
 	-1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 };
+
+/*
+ * HEX
+ */
+
+static const char hextbl[] = "0123456789abcdef";
+
+uint64
+hex_encode(const char *src, size_t len, char *dst)
+{
+	const char *end = src + len;
+
+	while (src < end)
+	{
+		*dst++ = hextbl[(*src >> 4) & 0xF];
+		*dst++ = hextbl[*src & 0xF];
+		src++;
+	}
+	return (uint64) len * 2;
+}
 
 static inline char
 get_hex(const char *cp)
@@ -103,4 +123,16 @@ hex_decode(const char *src, size_t len, char *dst)
 	}
 
 	return p - dst;
+}
+
+uint64
+hex_enc_len(const char *src, size_t srclen)
+{
+	return (uint64) srclen << 1;
+}
+
+uint64
+hex_dec_len(const char *src, size_t srclen)
+{
+	return (uint64) srclen >> 1;
 }
