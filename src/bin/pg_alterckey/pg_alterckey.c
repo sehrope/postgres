@@ -36,7 +36,7 @@
 
 #include "common/file_perm.h"
 #include "common/file_utils.h"
-#include "common/hex_decode.h"
+#include "common/hex.h"
 #include "common/restricted_token.h"
 #include "crypto/kmgr.h"
 #include "common/logging.h"

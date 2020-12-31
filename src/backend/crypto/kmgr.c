@@ -28,7 +28,7 @@
 #include "pgstat.h"
 
 #include "common/file_perm.h"
-#include "common/hex_decode.h"
+#include "common/hex.h"
 #include "common/kmgr_utils.h"
 #include "common/sha2.h"
 #include "access/xlog.h"
