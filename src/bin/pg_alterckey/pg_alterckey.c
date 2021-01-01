@@ -63,7 +63,7 @@ static char old_cluster_key[KMGR_CLUSTER_KEY_LEN],
 static CryptoKey data_key;
 unsigned char in_key[MAX_WRAPPED_KEY_LENGTH], out_key[MAX_WRAPPED_KEY_LENGTH];
 int in_klen, out_klen;
-static char top_path[MAXPGPATH], pid_path[MAXPGPATH], live_path[MAXPGPATH],
+static char kmgr_dir[MAXPGPATH], pid_path[MAXPGPATH], live_path[MAXPGPATH],
 			new_path[MAXPGPATH], old_path[MAXPGPATH];
 
 static char *DataDir = NULL;
@@ -227,7 +227,7 @@ main(int argc, char *argv[])
 
 	umask(pg_mode_mask);
 
-	snprintf(top_path, sizeof(top_path), "%s/%s", DataDir, KMGR_DIR);
+	snprintf(kmgr_dir, sizeof(kmgr_dir), "%s/%s", DataDir, KMGR_DIR);
 	snprintf(pid_path, sizeof(pid_path), "%s/%s", DataDir, KMGR_DIR_PID);
 	snprintf(live_path, sizeof(live_path), "%s/%s", DataDir, LIVE_KMGR_DIR);
 	snprintf(new_path, sizeof(new_path), "%s/%s", DataDir, NEW_KMGR_DIR);
@@ -282,7 +282,7 @@ create_lockfile(void)
 	struct stat buffer;
 	char lock_pid_str[20];
 
-	if (stat(top_path, &buffer) != 0 || !S_ISDIR(buffer.st_mode))
+	if (stat(kmgr_dir, &buffer) != 0 || !S_ISDIR(buffer.st_mode))
 	{
 		pg_log_error("cluster file encryption directory \"%s\" is missing;  is it enabled?", KMGR_DIR_PID);
 		fprintf(stderr, _("Exiting with no changes made.\n"));
