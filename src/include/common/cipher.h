@@ -34,13 +34,6 @@
 #define PG_AES192_KEY_LEN			(192 / 8)
 #define PG_AES256_KEY_LEN			(256 / 8)
 
-/*
- * The encrypted data is a series of blocks of size. Initialization
- * vector(IV) is the same size of cipher block.
- */
-#define PG_AES_BLOCK_SIZE			16
-#define PG_AES_IV_SIZE				(PG_AES_BLOCK_SIZE)
-
 #ifdef USE_OPENSSL
 typedef EVP_CIPHER_CTX PgCipherCtx;
 #else
