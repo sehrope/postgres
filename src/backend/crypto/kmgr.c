@@ -144,8 +144,7 @@ BootStrapKmgr(void)
 				char str[MAXPGPATH];
 				int out_len;
 
-				out_len = hex_encode((char *)(key->encrypted_key) + sizeof(int),
-						   *(int *)(key->encrypted_key), str);
+				out_len = hex_encode((char *)(key->key), key->klen, str);
 				str[out_len] = '\0';
 				fprintf(stderr,
 						"CFE DEBUG: generated, insecure, key %d: %s\n", id, str);
@@ -301,8 +300,8 @@ InitializeKmgr(void)
 			char str[MAXPGPATH];
 			int  out_len;
 
-			out_len = hex_encode((char *)(KmgrShmem->intlKeys[id].encrypted_key) + sizeof(int),
-					   *(int *)(KmgrShmem->intlKeys[id].encrypted_key), str);
+			out_len = hex_encode((char *)(KmgrShmem->intlKeys[id].key),
+								 KmgrShmem->intlKeys[id].klen, str);
 			str[out_len] = '\0';
 			fprintf(stderr,
 					"CFE DEBUG: decrypted, insecure, key %d: %s\n", id, str);
