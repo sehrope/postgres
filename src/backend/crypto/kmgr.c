@@ -336,7 +336,7 @@ generate_crypto_key(int len)
 {
 	CryptoKey *newkey;
 
-	Assert(len <= KMGR_MAX_KEY_LEN);
+	Assert(len <= KMGR_MAX_KEY_LEN_BYTES);
 	newkey = (CryptoKey *) palloc0(sizeof(CryptoKey));
 
 	newkey->klen = len;
