@@ -298,7 +298,7 @@ create_lockfile(void)
 		/* read the PID */
 		if ((len = read(lock_fd, lock_pid_str, sizeof(lock_pid_str) - 1)) == 0)
 		{
-			pg_log_error("cannot read pid from lock file \"%s\": %m", KMGR_DIR_PID);
+			pg_log_error("could not read pid from lock file \"%s\": %m", KMGR_DIR_PID);
 			fprintf(stderr, _("Exiting with no changes made.\n"));
 			exit(1);
 		}
@@ -619,9 +619,9 @@ reencrypt_data_keys(void)
 			if (len != in_klen)
 			{
 				if (len < 0)
-					pg_log_error("could read file \"%s\": %m", src_path);
+					pg_log_error("could not read file \"%s\": %m", src_path);
 				else
-					pg_log_error("could read file \"%s\": read %d of %u",
+					pg_log_error("could not read file \"%s\": read %d of %u",
 							 src_path, len, in_klen);
 				bzero_keys_and_exit(RMDIR_EXIT);
 			}
@@ -650,7 +650,7 @@ reencrypt_data_keys(void)
 			len = write(dst_fd, out_key, out_klen);
 			if (len != out_klen)
 			{
-				pg_log_error("could not write fie \"%s\"", dst_path);
+				pg_log_error("could not write file \"%s\"", dst_path);
 				bzero_keys_and_exit(RMDIR_EXIT);
 			}
 
