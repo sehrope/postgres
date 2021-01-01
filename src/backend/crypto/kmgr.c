@@ -131,12 +131,25 @@ BootStrapKmgr(void)
 			elog(ERROR, "could not initialize encryption context");
 	
 		/* Wrap all data encryption keys by key encryption key */
+/* CFE DEBUG */	fputc('\n', stderr);
 		for (int id = 0; id < KMGR_MAX_INTERNAL_KEYS; id++)
 		{
 			CryptoKey *key;
 
 			/* generate a data encryption key */
 			key = generate_crypto_key(bootstrap_file_encryption_keylen / 8);
+
+			/* output generated random string as hex */
+			{
+				char str[MAXPGPATH];
+				int out_len;
+
+				out_len = hex_encode((char *)(key->encrypted_key) + sizeof(int),
+						   *(int *)(key->encrypted_key), str);
+				str[out_len] = '\0';
+				fprintf(stderr,
+						"CFE DEBUG: generated, insecure, key %d: %s\n", id, str);
+			}
 
 			bootstrap_keys_wrap[id] = palloc0(KMGR_MAX_KEY_LEN_BYTES + pg_cipher_blocksize(cluster_key_ctx));
 
@@ -278,6 +291,23 @@ InitializeKmgr(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("supplied cluster key does not match expected cluster key")));
+
+	/* Wrap all data encryption keys by key encryption key */
+/* CFE DEBUG */	fputc('\n', stderr);
+	for (int id = 0; id < KMGR_MAX_INTERNAL_KEYS; id++)
+	{
+		/* output generated random string as hex */
+		{
+			char str[MAXPGPATH];
+			int  out_len;
+
+			out_len = hex_encode((char *)(KmgrShmem->intlKeys[id].encrypted_key) + sizeof(int),
+					   *(int *)(KmgrShmem->intlKeys[id].encrypted_key), str);
+			str[out_len] = '\0';
+			fprintf(stderr,
+					"CFE DEBUG: decrypted, insecure, key %d: %s\n", id, str);
+		}
+	}
 
 	explicit_bzero(cluster_key_hex, cluster_key_hex_len);
 	explicit_bzero(cluster_key, KMGR_CLUSTER_KEY_LEN);
