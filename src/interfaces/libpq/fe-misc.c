@@ -1050,6 +1050,7 @@ pqWriteReady(PGconn *conn)
 static int
 pqSocketCheck(PGconn *conn, int forRead, int forWrite, time_t end_time)
 {
+	int 		fd;
 	int			result;
 
 	if (!conn)
@@ -1070,9 +1071,17 @@ pqSocketCheck(PGconn *conn, int forRead, int forWrite, time_t end_time)
 	}
 #endif
 
+	if (forRead) {
+		fd = conn->sock_in;
+	} else if (forWrite) {
+		fd = conn->sock_out;
+	} else {
+		assert(false);
+	}
+
 	/* We will retry as long as we get EINTR */
 	do
-		result = pqSocketPoll(conn->sock, forRead, forWrite, end_time);
+		result = pqSocketPoll(fd, forRead, forWrite, end_time);
 	while (result < 0 && SOCK_ERRNO == EINTR);
 
 	if (result < 0)

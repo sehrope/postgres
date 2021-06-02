@@ -455,6 +455,8 @@ pqDropConnection(PGconn *conn, bool flushInput)
 	if (conn->sock != PGINVALID_SOCKET)
 		closesocket(conn->sock);
 	conn->sock = PGINVALID_SOCKET;
+	conn->sock_in = -1;
+	conn->sock_out = -1;
 
 	/* Optionally discard any unread data */
 	if (flushInput)
@@ -2569,6 +2571,8 @@ keep_going:						/* We will come back to here until there is
 										  SOCK_STRERROR(errorno, sebuf, sizeof(sebuf)));
 						goto error_return;
 					}
+					conn->sock_in = conn->sock;
+					conn->sock_out = conn->sock;
 
 					/*
 					 * Once we've identified a target address, all errors
@@ -3964,6 +3968,8 @@ makeEmptyPGconn(void)
 	conn->verbosity = PQERRORS_DEFAULT;
 	conn->show_context = PQSHOW_CONTEXT_ERRORS;
 	conn->sock = PGINVALID_SOCKET;
+	conn->sock_in = -1;
+	conn->sock_out = -1;
 	conn->Pfdebug = NULL;
 
 	/*

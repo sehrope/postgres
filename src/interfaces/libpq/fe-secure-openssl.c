@@ -76,7 +76,12 @@ static int	PQssl_passwd_cb(char *buf, int size, int rwflag, void *userdata);
 static int	my_sock_read(BIO *h, char *buf, int size);
 static int	my_sock_write(BIO *h, const char *buf, int size);
 static BIO_METHOD *my_BIO_s_socket(void);
-static int	my_SSL_set_fd(PGconn *conn, int fd);
+typedef enum SslFileOperation {
+	SSL_FILE_OP_ALL,
+	SSL_FILE_OP_READ,
+	SSL_FILE_OP_WRITE,
+} SslFileOperation;
+static int	my_SSL_set_fd(PGconn *conn, int fd, SslFileOperation op);
 
 
 static bool pq_init_ssl_lib = true;
@@ -1061,7 +1066,8 @@ initialize_SSL(PGconn *conn)
 	 */
 	if (!(conn->ssl = SSL_new(SSL_context)) ||
 		!SSL_set_app_data(conn->ssl, conn) ||
-		!my_SSL_set_fd(conn, conn->sock))
+		!my_SSL_set_fd(conn, conn->sock_in, SSL_FILE_OP_READ) ||
+		!my_SSL_set_fd(conn, conn->sock_out, SSL_FILE_OP_WRITE))
 	{
 		char	   *err = SSLerrmessage(ERR_get_error());
 
@@ -1732,7 +1738,7 @@ my_BIO_s_socket(void)
 
 /* This should exactly match OpenSSL's SSL_set_fd except for using my BIO */
 static int
-my_SSL_set_fd(PGconn *conn, int fd)
+my_SSL_set_fd(PGconn *conn, int fd, SslFileOperation op)
 {
 	int			ret = 0;
 	BIO		   *bio;
@@ -1751,8 +1757,17 @@ my_SSL_set_fd(PGconn *conn, int fd)
 		goto err;
 	}
 	BIO_set_data(bio, conn);
-
-	SSL_set_bio(conn->ssl, bio, bio);
+	switch (op) {
+		case SSL_FILE_OP_ALL:
+			SSL_set_bio(conn->ssl, bio, bio);
+			break;
+		case SSL_FILE_OP_READ:
+			SSL_set0_rbio(conn->ssl, bio);
+			break;
+		case SSL_FILE_OP_WRITE:
+			SSL_set0_wbio(conn->ssl, bio);
+			break;
+	}
 	BIO_set_fd(bio, fd, BIO_NOCLOSE);
 	ret = 1;
 err:

@@ -440,6 +440,8 @@ struct pg_conn
 	PGcmdQueueEntry *cmd_queue_recycle;
 
 	/* Connection data */
+	int			sock_in;		/* FD for socket input */
+	int			sock_out;		/* FD for socket output */
 	pgsocket	sock;			/* FD for socket, PGINVALID_SOCKET if
 								 * unconnected */
 	SockAddr	laddr;			/* Local address */
