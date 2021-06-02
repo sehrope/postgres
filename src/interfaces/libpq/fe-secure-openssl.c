@@ -1093,7 +1093,7 @@ initialize_SSL(PGconn *conn)
 	 * Per RFC 6066, do not set it if the host is a literal IP address (IPv4
 	 * or IPv6).
 	 */
-	if (conn->sslsni && conn->sslsni[0] &&
+	if (conn->sslsni && conn->sslsni[0] && conn->pghost &&
 		!(strspn(conn->pghost, "0123456789.") == strlen(conn->pghost) ||
 		  strchr(conn->pghost, ':')))
 	{

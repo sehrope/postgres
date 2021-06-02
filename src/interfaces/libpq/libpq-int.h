@@ -354,6 +354,8 @@ struct pg_conn
 								 * which the server is running, or a
 								 * comma-separated list of same.  Takes
 								 * precedence over pghost. */
+	char		*pghostcmd;		/* proxy command to use as socket in / out */
+	pid_t		proxy_pid;      /* proxy command process id */
 	char	   *pgport;			/* the server's communication port number, or
 								 * a comma-separated list of ports */
 	char	   *connect_timeout;	/* connection timeout (numeric string) */

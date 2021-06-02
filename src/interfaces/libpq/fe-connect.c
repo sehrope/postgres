@@ -16,6 +16,7 @@
 #include "postgres_fe.h"
 
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <fcntl.h>
 #include <ctype.h>
 #include <time.h>
@@ -224,6 +225,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 	{"hostaddr", "PGHOSTADDR", NULL, NULL,
 		"Database-Host-IP-Address", "", 45,
 	offsetof(struct pg_conn, pghostaddr)},
+
+	{"hostcmd", "PGHOSTCMD", NULL, NULL,
+		"Database-Host-Proxy-Command", "", 1024,
+	offsetof(struct pg_conn, pghostcmd)},
 
 	{"port", "PGPORT", DEF_PGPORT_STR, NULL,
 		"Database-Port", "", 6,
@@ -452,11 +457,18 @@ pqDropConnection(PGconn *conn, bool flushInput)
 	pqsecure_close(conn);
 
 	/* Close the socket itself */
-	if (conn->sock != PGINVALID_SOCKET)
-		closesocket(conn->sock);
+	if (conn->proxy_pid != 0) {
+		kill(conn->proxy_pid, SIGTERM);
+		close(conn->sock_in);
+		close(conn->sock_out);
+		conn->proxy_pid = 0;
+		conn->sock_in = -1;
+		conn->sock_out = -1;
+	} else {
+		if (conn->sock != PGINVALID_SOCKET)
+			closesocket(conn->sock);
+	}
 	conn->sock = PGINVALID_SOCKET;
-	conn->sock_in = -1;
-	conn->sock_out = -1;
 
 	/* Optionally discard any unread data */
 	if (flushInput)
@@ -2507,6 +2519,71 @@ keep_going:						/* We will come back to here until there is
 	{
 		case CONNECTION_NEEDED:
 			{
+				if (conn->pghostcmd != NULL) {
+					char *command_string;
+					int pin[2], pout[2];
+					pid_t pid;
+					char *shell;
+
+					if ((shell = getenv("SHELL")) == NULL || *shell == '\0')
+						shell = "/bin/sh";
+					/* Create pipes for communicating with the proxy. */
+					if (pipe(pin) == -1 || pipe(pout) == -1) {
+						appendPQExpBuffer(&conn->errorMessage,
+										  libpq_gettext("proxy command create pipe failed: %s\n"),
+										  strerror(errno));
+						goto error_return;
+					}
+					command_string = conn->pghostcmd; /* TODO: Expand %h etc */
+					if ((pid = fork()) == 0) {
+						/* Child */
+						char *argv[10];
+						close(pin[1]);
+						if (pin[0] != 0) {
+							if (dup2(pin[0], 0) == -1) {
+								perror("dup2 stdin");
+							}
+							close(pin[0]);
+						}
+						close(pout[0]);
+						if (dup2(pout[1], 1) == -1) {
+							perror("dup2 stdout");
+						}
+						close(pout[1]);
+
+						argv[0] = shell;
+						argv[1] = "-c";
+						argv[2] = command_string;
+						argv[3] = NULL;
+
+						execv(argv[0], argv);
+						perror(argv[0]);
+						exit(1);
+					}
+					/* Parent */
+					if (pid == -1) {
+						appendPQExpBuffer(&conn->errorMessage,
+										  libpq_gettext("proxy command fork failed: %s\n"),
+										  strerror(errno));
+						goto error_return;
+					}
+					conn->proxy_pid = pid;
+					close(pin[0]);
+					close(pout[1]);
+					// Assign the pipes as the connections input / output
+					conn->sock_in = pout[0];
+					conn->sock_out = pin[1];
+					if (fcntl(conn->sock_in, F_SETFL, O_NONBLOCK) == -1 ||
+						fcntl(conn->sock_out, F_SETFL, O_NONBLOCK) == -1) {
+						appendPQExpBuffer(&conn->errorMessage,
+										  libpq_gettext("proxy command fcntl for non-blocking failed: %s\n"),
+										  strerror(errno));
+						goto error_return;
+					}
+					conn->sock = 0; /* DUMMY! */
+					conn->status = CONNECTION_MADE; /* We got skip CONNECTION_STARTING */
+					return PGRES_POLLING_WRITING;
+				}
 				/*
 				 * Try to initiate a connection to one of the addresses
 				 * returned by pg_getaddrinfo_all().  conn->addr_cur is the
