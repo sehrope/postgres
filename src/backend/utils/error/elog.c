@@ -80,6 +80,7 @@
 #include "storage/proc.h"
 #include "tcop/tcopprot.h"
 #include "utils/guc.h"
+#include "utils/json.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
 
@@ -180,6 +181,7 @@ static void setup_formatted_start_time(void);
 static const char *process_log_prefix_padding(const char *p, int *padding);
 static void log_line_prefix(StringInfo buf, ErrorData *edata);
 static void write_csvlog(ErrorData *edata);
+static void write_jsonlog(ErrorData *edata);
 static void send_message_to_server_log(ErrorData *edata);
 static void write_pipe_chunks(char *data, int len, int dest);
 static void send_message_to_frontend(ErrorData *edata);
@@ -2981,6 +2983,274 @@ write_csvlog(ErrorData *edata)
 }
 
 /*
+ * appendJSONKeyValue
+ * Append to given StringInfo a comma followed by a JSON key and value.
+ * Both the key and value will be escaped as JSON string literals.
+ */
+static void
+appendJSONKeyValue(StringInfo buf, const char *key, const char *value)
+{
+	if (value == NULL)
+		return;
+	appendStringInfoChar(buf, ',');
+	escape_json(buf, key);
+	appendStringInfoChar(buf, ':');
+	escape_json(buf, value);
+}
+
+/*
+ * appendJSONKeyValueFmt
+ * Evaluate the fmt string and then invoke appendJSONKeyValue as the
+ * value of the JSON property. Both the key and value will be escaped by
+ * appendJSONKeyValue.
+ */
+static void
+appendJSONKeyValueFmt(StringInfo buf, const char *key, const char *fmt,...)
+{
+	int			save_errno = errno;
+	size_t		len = 128;		/* initial assumption about buffer size */
+	char	    *value;
+
+	for (;;)
+	{
+		va_list		args;
+		size_t		newlen;
+
+		/*
+		 * Allocate result buffer.  Note that in frontend this maps to malloc
+		 * with exit-on-error.
+		 */
+		value = (char *) palloc(len);
+
+		/* Try to format the data. */
+		errno = save_errno;
+		va_start(args, fmt);
+		newlen = pvsnprintf(value, len, fmt, args);
+		va_end(args);
+
+		if (newlen < len)
+			break; /* success */
+
+		/* Release buffer and loop around to try again with larger len. */
+		pfree(value);
+		len = newlen;
+	}
+	appendJSONKeyValue(buf, key, value);
+	/* Clean up */
+	pfree(value);
+}
+
+/*
+ * appendJSONKeyValueAsInt
+ * Append to given StringInfo a comma followed by a JSON key and value with
+ * value being formatted as a signed integer (a JSON number).
+ */
+static void
+appendJSONKeyValueAsInt(StringInfo buf, const char *key, int value)
+{
+	appendStringInfoChar(buf, ',');
+	escape_json(buf, key);
+	appendStringInfoChar(buf, ':');
+	appendStringInfo(buf, "%d", value);
+}
+
+/*
+ * appendJSONKeyValueAsInt
+ * Append to given StringInfo a comma followed by a JSON key and value with
+ * value being formatted as an unsigned integer (a JSON number).
+ */
+static void
+appendJSONKeyValueAsUInt(StringInfo buf, const char *key, int value)
+{
+	appendStringInfoChar(buf, ',');
+	escape_json(buf, key);
+	appendStringInfoChar(buf, ':');
+	appendStringInfo(buf, "%u", value);
+}
+
+/*
+ * appendJSONKeyValueAsInt
+ * Append to given StringInfo a comma followed by a JSON key and value with
+ * value being formatted as a long (a JSON number).
+ */
+static void
+appendJSONKeyValueAsLong(StringInfo buf, const char *key, long value)
+{
+	appendStringInfoChar(buf, ',');
+	escape_json(buf, key);
+	appendStringInfoChar(buf, ':');
+	appendStringInfo(buf, "%ld", value);
+}
+
+/*
+ * Write logs in json format.
+ */
+static void
+write_jsonlog(ErrorData *edata)
+{
+	StringInfoData	buf;
+
+	/* static counter for line numbers */
+	static long	log_line_number = 0;
+
+	/* Has the counter been reset in the current process? */
+	static int	log_my_pid = 0;
+
+	if (log_my_pid != MyProcPid)
+	{
+		log_line_number = 0;
+		log_my_pid = MyProcPid;
+		formatted_start_time[0] = '\0';
+	}
+	log_line_number++;
+
+	initStringInfo(&buf);
+
+	/* Initialize string */
+	appendStringInfoChar(&buf, '{');
+
+	/*
+	 * timestamp with milliseconds
+	 *
+	 * Check if the timestamp is already calculated for the syslog message,
+	 * and use it if so.  Otherwise, get the current timestamp.  This is done
+	 * to put same timestamp in both syslog and jsonlog messages.
+	 */
+	if (formatted_log_time[0] == '\0')
+		setup_formatted_log_time();
+
+	/* First property does not use appendJSONKeyValue as it does not have comma prefix */
+	escape_json(&buf, "timestamp");
+	appendStringInfoChar(&buf, ':');
+	escape_json(&buf, formatted_log_time);
+
+	/* username */
+	if (MyProcPort)
+		appendJSONKeyValue(&buf, "user", MyProcPort->user_name);
+
+	/* database name */
+	if (MyProcPort)
+		appendJSONKeyValue(&buf, "dbname", MyProcPort->database_name);
+
+	/* Process ID */
+	if (MyProcPid != 0)
+		appendJSONKeyValueAsInt(&buf, "pid", MyProcPid);
+
+	/* Remote host and port */
+	if (MyProcPort && MyProcPort->remote_host)
+	{
+		appendJSONKeyValue(&buf, "remote_host", MyProcPort->remote_host);
+		if (MyProcPort->remote_port && MyProcPort->remote_port[0] != '\0')
+			appendJSONKeyValue(&buf, "remote_port", MyProcPort->remote_port);
+	}
+
+	/* Session id */
+	appendJSONKeyValueFmt(&buf, "session_id", "%lx.%x", (long) MyStartTime, MyProcPid);
+
+	/* Line number */
+	appendJSONKeyValueAsLong(&buf, "line_num", log_line_number);
+
+	/* PS display */
+	if (MyProcPort)
+	{
+		StringInfoData	msgbuf;
+		const char	   *psdisp;
+		int				displen;
+
+		initStringInfo(&msgbuf);
+		psdisp = get_ps_display(&displen);
+		appendBinaryStringInfo(&msgbuf, psdisp, displen);
+		appendJSONKeyValue(&buf, "ps", msgbuf.data);
+
+		pfree(msgbuf.data);
+	}
+
+	/* session start timestamp */
+	if (formatted_start_time[0] == '\0')
+		setup_formatted_start_time();
+	appendJSONKeyValue(&buf, "session_start", formatted_start_time);
+
+	/* Virtual transaction id */
+	/* keep VXID format in sync with lockfuncs.c */
+	if (MyProc != NULL && MyProc->backendId != InvalidBackendId)
+		appendJSONKeyValueFmt(&buf, "vxid", "%d/%u", MyProc->backendId, MyProc->lxid);
+
+	/* Transaction id */
+	appendJSONKeyValueFmt(&buf, "txid", "%u", GetTopTransactionIdIfAny());
+
+	/* Error severity */
+	if (edata->elevel)
+		appendJSONKeyValue(&buf, "error_severity", (char *) error_severity(edata->elevel));
+
+	/* SQL state code */
+	if (edata->sqlerrcode)
+		appendJSONKeyValue(&buf, "state_code", unpack_sql_state(edata->sqlerrcode));
+
+	/* errdetail or error_detail log */
+	if (edata->detail_log)
+		appendJSONKeyValue(&buf, "detail", edata->detail_log);
+	else if (edata->detail)
+		appendJSONKeyValue(&buf, "detail", edata->detail);
+
+	/* errhint */
+	if (edata->hint)
+		appendJSONKeyValue(&buf, "hint", edata->hint);
+
+	/* Internal query */
+	if (edata->internalquery)
+		appendJSONKeyValue(&buf, "internal_query", edata->internalquery);
+
+	/* If the internal query got printed, print internal pos, too */
+	if (edata->internalpos > 0 && edata->internalquery != NULL)
+		appendJSONKeyValueAsUInt(&buf, "internal_position", edata->internalpos);
+
+	/* errcontext */
+	if (edata->context && !edata->hide_ctx)
+		appendJSONKeyValue(&buf, "context", edata->context);
+
+	/* user query --- only reported if not disabled by the caller */
+	if (is_log_level_output(edata->elevel, log_min_error_statement) &&
+		debug_query_string != NULL &&
+		!edata->hide_stmt)
+	{
+		appendJSONKeyValue(&buf, "statement", debug_query_string);
+		if (edata->cursorpos > 0)
+			appendJSONKeyValueAsInt(&buf, "cursor_position", edata->cursorpos);
+	}
+
+	/* file error location */
+	if (Log_error_verbosity >= PGERROR_VERBOSE)
+	{
+		if (edata->funcname)
+			appendJSONKeyValue(&buf, "func_name", edata->funcname);
+		if (edata->filename)
+		{
+			appendJSONKeyValue(&buf, "file_name", edata->filename);
+			appendJSONKeyValueAsInt(&buf, "file_line_num", edata->lineno);
+		}
+	}
+
+	/* Application name */
+	if (application_name && application_name[0] != '\0')
+		appendJSONKeyValue(&buf, "application_name", application_name);
+
+	/* Error message */
+	appendJSONKeyValue(&buf, "message", edata->message);
+
+	/* Finish string */
+	appendStringInfoChar(&buf, '}');
+	appendStringInfoChar(&buf, '\n');
+
+	/* If in the syslogger process, try to write messages direct to file */
+	if (MyBackendType == B_LOGGER)
+		write_syslogger_file(buf.data, buf.len, LOG_DESTINATION_JSONLOG);
+	else
+		write_pipe_chunks(buf.data, buf.len, LOG_DESTINATION_JSONLOG);
+
+	pfree(buf.data);
+}
+
+/*
  * Unpack MAKE_SQLSTATE code. Note that this returns a pointer to a
  * static buffer.
  */
@@ -3213,6 +3483,30 @@ send_message_to_server_log(ErrorData *edata)
 			pfree(buf.data);
 		}
 	}
+	/* Write to JSON log if enabled */
+	else if (Log_destination & LOG_DESTINATION_JSONLOG)
+	{
+		if (redirection_done || MyBackendType == B_LOGGER)
+		{
+			/*
+			 * send JSON data if it's safe to do so (syslogger doesn't need the
+			 * pipe). First get back the space in the message buffer.
+			 */
+			pfree(buf.data);
+			write_jsonlog(edata);
+		}
+		else
+		{
+			/*
+			 * syslogger not up (yet), so just dump the message to stderr,
+			 * unless we already did so above.
+			 */
+			if (!(Log_destination & LOG_DESTINATION_STDERR) &&
+				whereToSendOutput != DestDebug)
+				write_console(buf.data, buf.len);
+			pfree(buf.data);
+		}
+	}
 	else
 	{
 		pfree(buf.data);
@@ -3256,7 +3550,7 @@ write_pipe_chunks(char *data, int len, int dest)
 	/* write all but the last chunk */
 	while (len > PIPE_MAX_PAYLOAD)
 	{
-		p.proto.is_last = (dest == LOG_DESTINATION_CSVLOG ? 'F' : 'f');
+		p.proto.is_last = ((dest == LOG_DESTINATION_CSVLOG || dest == LOG_DESTINATION_JSONLOG) ? 'F' : 'f');
 		p.proto.len = PIPE_MAX_PAYLOAD;
 		memcpy(p.proto.data, data, PIPE_MAX_PAYLOAD);
 		rc = write(fd, &p, PIPE_HEADER_SIZE + PIPE_MAX_PAYLOAD);
