@@ -420,7 +420,7 @@ SysLoggerMain(int argc, char *argv[])
 			 * was sent by pg_rotate_logfile() or "pg_ctl logrotate".
 			 */
 			if (!time_based_rotation && size_rotation_for == 0)
-				size_rotation_for = LOG_DESTINATION_STDERR | LOG_DESTINATION_CSVLOG;
+				size_rotation_for = LOG_DESTINATIONS_WITH_FILES;
 			logfile_rotate(time_based_rotation, size_rotation_for);
 		}
 
@@ -1465,8 +1465,7 @@ update_metainfo_datafile(void)
 	FILE	   *fh;
 	mode_t		oumask;
 
-	if (!(Log_destination & LOG_DESTINATION_STDERR) &&
-		!(Log_destination & LOG_DESTINATION_CSVLOG))
+	if (!(Log_destination & LOG_DESTINATIONS_WITH_FILES))
 	{
 		if (unlink(LOG_METAINFO_DATAFILE) < 0 && errno != ENOENT)
 			ereport(LOG,

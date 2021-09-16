@@ -437,6 +437,9 @@ extern bool syslog_split_messages;
 #define LOG_DESTINATION_EVENTLOG 4
 #define LOG_DESTINATION_CSVLOG	 8
 
+/* Log destinations with file handles */
+#define LOG_DESTINATIONS_WITH_FILES (LOG_DESTINATION_CSVLOG | LOG_DESTINATION_STDERR)
+
 /* Other exported functions */
 extern void DebugFileOpen(void);
 extern char *unpack_sql_state(int sql_state);
