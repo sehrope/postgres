@@ -84,11 +84,23 @@ extern bool redirection_done;
 static pg_time_t next_rotation_time;
 static bool pipe_eof_seen = false;
 static bool rotation_disabled = false;
-static FILE *syslogFile = NULL;
-static FILE *csvlogFile = NULL;
 NON_EXEC_STATIC pg_time_t first_syslogger_file_time = 0;
-static char *last_file_name = NULL;
-static char *last_csv_file_name = NULL;
+
+typedef struct
+{
+	FILE *file;
+	char *last_file_name;
+	const int dest;
+	const char* name;
+	const char* suffix;
+} FileLogDestination;
+
+static FileLogDestination stderr_file_info = {NULL, NULL, LOG_DESTINATION_STDERR, "stderr", NULL};
+static FileLogDestination csvlog_file_info = {NULL, NULL, LOG_DESTINATION_CSVLOG, "csvlog", ".csv"};
+
+static inline bool file_log_dest_should_rotate_for_size(const FileLogDestination *info);
+static bool file_log_dest_rotate(FileLogDestination *info, pg_time_t fntime, bool time_based_rotation, int size_rotation_for);
+static inline void file_log_dest_close(FileLogDestination *info);
 
 /*
  * Buffers for saving partial messages from different backends.
@@ -137,6 +149,8 @@ NON_EXEC_STATIC void SysLoggerMain(int argc, char *argv[]) pg_attribute_noreturn
 static void process_pipe_input(char *logbuffer, int *bytes_in_logbuffer);
 static void flush_pipe_input(char *logbuffer, int *bytes_in_logbuffer);
 static FILE *logfile_open(const char *filename, const char *mode,
+						  bool allow_errors);
+static FILE *logfile_open_suffix(const char *filename, const char *mode,
 						  bool allow_errors);
 
 #ifdef WIN32
@@ -272,9 +286,9 @@ SysLoggerMain(int argc, char *argv[])
 	 * time because passing down just the pg_time_t is a lot cheaper than
 	 * passing a whole file path in the EXEC_BACKEND case.
 	 */
-	last_file_name = logfile_getname(first_syslogger_file_time, NULL);
-	if (csvlogFile != NULL)
-		last_csv_file_name = logfile_getname(first_syslogger_file_time, ".csv");
+	stderr_file_info.last_file_name = logfile_getname(first_syslogger_file_time, stderr_file_info.suffix);
+	if (csvlog_file_info.file != NULL)
+		csvlog_file_info.last_file_name = logfile_getname(first_syslogger_file_time, csvlog_file_info.suffix);
 
 	/* remember active logfile parameters */
 	currentLogDir = pstrdup(Log_directory);
@@ -358,7 +372,7 @@ SysLoggerMain(int argc, char *argv[])
 			 * we need to open or close csvlogFile accordingly.
 			 */
 			if (((Log_destination & LOG_DESTINATION_CSVLOG) != 0) !=
-				(csvlogFile != NULL))
+				(csvlog_file_info.file != NULL))
 				rotation_requested = true;
 
 			/*
@@ -400,13 +414,12 @@ SysLoggerMain(int argc, char *argv[])
 		if (!rotation_requested && Log_RotationSize > 0 && !rotation_disabled)
 		{
 			/* Do a rotation if file is too big */
-			if (ftell(syslogFile) >= Log_RotationSize * 1024L)
+			if (file_log_dest_should_rotate_for_size(&stderr_file_info))
 			{
 				rotation_requested = true;
 				size_rotation_for |= LOG_DESTINATION_STDERR;
 			}
-			if (csvlogFile != NULL &&
-				ftell(csvlogFile) >= Log_RotationSize * 1024L)
+			if (file_log_dest_should_rotate_for_size(&csvlog_file_info))
 			{
 				rotation_requested = true;
 				size_rotation_for |= LOG_DESTINATION_CSVLOG;
@@ -541,7 +554,6 @@ int
 SysLogger_Start(void)
 {
 	pid_t		sysloggerPid;
-	char	   *filename;
 
 	if (!Logging_collector)
 		return 0;
@@ -606,25 +618,14 @@ SysLogger_Start(void)
 	 */
 	first_syslogger_file_time = time(NULL);
 
-	filename = logfile_getname(first_syslogger_file_time, NULL);
-
-	syslogFile = logfile_open(filename, "a", false);
-
-	pfree(filename);
-
 	/*
-	 * Likewise for the initial CSV log file, if that's enabled.  (Note that
-	 * we open syslogFile even when only CSV output is nominally enabled,
-	 * since some code paths will write to syslogFile anyway.)
+	 * stderr file will always be opened since some code paths will write there
+	 * even if only other log destinations are enabled.
 	 */
+	stderr_file_info.file = logfile_open_suffix(stderr_file_info.suffix, "a", false);
+	/* Likewise for the initial CSV log file, if that's enabled. */
 	if (Log_destination & LOG_DESTINATION_CSVLOG)
-	{
-		filename = logfile_getname(first_syslogger_file_time, ".csv");
-
-		csvlogFile = logfile_open(filename, "a", false);
-
-		pfree(filename);
-	}
+		csvlog_file_info.file = logfile_open_suffix(csvlog_file_info.suffix, "a", false);
 
 #ifdef EXEC_BACKEND
 	switch ((sysloggerPid = syslogger_forkexec()))
@@ -716,13 +717,8 @@ SysLogger_Start(void)
 			}
 
 			/* postmaster will never write the file(s); close 'em */
-			fclose(syslogFile);
-			syslogFile = NULL;
-			if (csvlogFile != NULL)
-			{
-				fclose(csvlogFile);
-				csvlogFile = NULL;
-			}
+			file_log_dest_close(&stderr_file_info);
+			file_log_dest_close(&csvlog_file_info);
 			return (int) sysloggerPid;
 	}
 
@@ -765,9 +761,9 @@ syslogger_forkexec(void)
 	av[ac++] = NULL;			/* filled in by postmaster_forkexec */
 
 	/* static variables (those not passed by write_backend_variables) */
-	snprintf(filenobuf, sizeof(filenobuf), "%ld", syslogger_get_fileno(syslogFile));
+	snprintf(filenobuf, sizeof(filenobuf), "%ld", syslogger_get_fileno(stderr_file_info.file));
 	av[ac++] = filenobuf;
-	snprintf(csvfilenobuf, sizeof(csvfilenobuf), "%ld", syslogger_get_fileno(csvlogFile));
+	snprintf(csvfilenobuf, sizeof(csvfilenobuf), "%ld", syslogger_get_fileno(csvlog_file_info.file));
 	av[ac++] = csvfilenobuf;
 
 	av[ac] = NULL;
@@ -819,8 +815,8 @@ syslogger_parseArgs(int argc, char *argv[])
 	 * fails there's not a lot we can do to report the problem anyway.  As
 	 * coded, we'll just crash on a null pointer dereference after failure...
 	 */
-	syslogFile = syslogger_fdopen(atoi(*argv++));
-	csvlogFile = syslogger_fdopen(atoi(*argv++));
+	stderr_file_info.file = syslogger_fdopen(atoi(*argv++));
+	csvlog_file_info.file = syslogger_fdopen(atoi(*argv++));
 }
 #endif							/* EXEC_BACKEND */
 
@@ -1081,8 +1077,10 @@ write_syslogger_file(const char *buffer, int count, int destination)
 	 * Think not to improve this by trying to open csvlogFile on-the-fly.  Any
 	 * failure in that would lead to recursion.
 	 */
-	logfile = (destination == LOG_DESTINATION_CSVLOG &&
-			   csvlogFile != NULL) ? csvlogFile : syslogFile;
+	if (destination == LOG_DESTINATION_CSVLOG && csvlog_file_info.file != NULL)
+		logfile = csvlog_file_info.file;
+	else
+		logfile = stderr_file_info.file;
 
 	rc = fwrite(buffer, 1, count, logfile);
 
@@ -1152,8 +1150,8 @@ pipeThread(void *arg)
 		 */
 		if (Log_RotationSize > 0)
 		{
-			if (ftell(syslogFile) >= Log_RotationSize * 1024L ||
-				(csvlogFile != NULL && ftell(csvlogFile) >= Log_RotationSize * 1024L))
+			if (file_log_dest_should_rotate_for_size(&stderr_file_info) ||
+				file_log_dest_should_rotate_for_size(&csvlog_file_info))
 				SetLatch(MyLatch);
 		}
 		LeaveCriticalSection(&sysloggerSection);
@@ -1219,15 +1217,28 @@ logfile_open(const char *filename, const char *mode, bool allow_errors)
 }
 
 /*
+ * Generate a logfile name from a given suffix and then open it.
+ */
+static FILE *
+logfile_open_suffix(const char *suffix, const char *mode, bool allow_errors)
+{
+	FILE *file;
+	char *filename;
+
+	filename = logfile_getname(first_syslogger_file_time, suffix);
+	file = logfile_open(filename, "a", allow_errors);
+
+	pfree(filename);
+	return file;
+}
+
+/*
  * perform logfile rotation
  */
 static void
 logfile_rotate(bool time_based_rotation, int size_rotation_for)
 {
-	char	   *filename;
-	char	   *csvfilename = NULL;
 	pg_time_t	fntime;
-	FILE	   *fh;
 
 	rotation_requested = false;
 
@@ -1240,124 +1251,19 @@ logfile_rotate(bool time_based_rotation, int size_rotation_for)
 		fntime = next_rotation_time;
 	else
 		fntime = time(NULL);
-	filename = logfile_getname(fntime, NULL);
-	if (Log_destination & LOG_DESTINATION_CSVLOG)
-		csvfilename = logfile_getname(fntime, ".csv");
 
-	/*
-	 * Decide whether to overwrite or append.  We can overwrite if (a)
-	 * Log_truncate_on_rotation is set, (b) the rotation was triggered by
-	 * elapsed time and not something else, and (c) the computed file name is
-	 * different from what we were previously logging into.
-	 *
-	 * Note: last_file_name should never be NULL here, but if it is, append.
-	 */
-	if (time_based_rotation || (size_rotation_for & LOG_DESTINATION_STDERR))
-	{
-		if (Log_truncate_on_rotation && time_based_rotation &&
-			last_file_name != NULL &&
-			strcmp(filename, last_file_name) != 0)
-			fh = logfile_open(filename, "w", true);
-		else
-			fh = logfile_open(filename, "a", true);
+	if (!file_log_dest_rotate(&stderr_file_info, fntime, time_based_rotation, size_rotation_for))
+		/* error rotating stderr so try again later */
+		return;
 
-		if (!fh)
-		{
-			/*
-			 * ENFILE/EMFILE are not too surprising on a busy system; just
-			 * keep using the old file till we manage to get a new one.
-			 * Otherwise, assume something's wrong with Log_directory and stop
-			 * trying to create files.
-			 */
-			if (errno != ENFILE && errno != EMFILE)
-			{
-				ereport(LOG,
-						(errmsg("disabling automatic rotation (use SIGHUP to re-enable)")));
-				rotation_disabled = true;
-			}
-
-			if (filename)
-				pfree(filename);
-			if (csvfilename)
-				pfree(csvfilename);
+	if (Log_destination & LOG_DESTINATION_CSVLOG) {
+		if (!file_log_dest_rotate(&csvlog_file_info, fntime, time_based_rotation, size_rotation_for))
+			/* error rotating csvlog so try again later */
 			return;
-		}
-
-		fclose(syslogFile);
-		syslogFile = fh;
-
-		/* instead of pfree'ing filename, remember it for next time */
-		if (last_file_name != NULL)
-			pfree(last_file_name);
-		last_file_name = filename;
-		filename = NULL;
-	}
-
-	/*
-	 * Same as above, but for csv file.  Note that if LOG_DESTINATION_CSVLOG
-	 * was just turned on, we might have to open csvlogFile here though it was
-	 * not open before.  In such a case we'll append not overwrite (since
-	 * last_csv_file_name will be NULL); that is consistent with the normal
-	 * rules since it's not a time-based rotation.
-	 */
-	if ((Log_destination & LOG_DESTINATION_CSVLOG) &&
-		(csvlogFile == NULL ||
-		 time_based_rotation || (size_rotation_for & LOG_DESTINATION_CSVLOG)))
-	{
-		if (Log_truncate_on_rotation && time_based_rotation &&
-			last_csv_file_name != NULL &&
-			strcmp(csvfilename, last_csv_file_name) != 0)
-			fh = logfile_open(csvfilename, "w", true);
-		else
-			fh = logfile_open(csvfilename, "a", true);
-
-		if (!fh)
-		{
-			/*
-			 * ENFILE/EMFILE are not too surprising on a busy system; just
-			 * keep using the old file till we manage to get a new one.
-			 * Otherwise, assume something's wrong with Log_directory and stop
-			 * trying to create files.
-			 */
-			if (errno != ENFILE && errno != EMFILE)
-			{
-				ereport(LOG,
-						(errmsg("disabling automatic rotation (use SIGHUP to re-enable)")));
-				rotation_disabled = true;
-			}
-
-			if (filename)
-				pfree(filename);
-			if (csvfilename)
-				pfree(csvfilename);
-			return;
-		}
-
-		if (csvlogFile != NULL)
-			fclose(csvlogFile);
-		csvlogFile = fh;
-
-		/* instead of pfree'ing filename, remember it for next time */
-		if (last_csv_file_name != NULL)
-			pfree(last_csv_file_name);
-		last_csv_file_name = csvfilename;
-		csvfilename = NULL;
-	}
-	else if (!(Log_destination & LOG_DESTINATION_CSVLOG) &&
-			 csvlogFile != NULL)
-	{
+	} else if (csvlog_file_info.file != NULL) {
 		/* CSVLOG was just turned off, so close the old file */
-		fclose(csvlogFile);
-		csvlogFile = NULL;
-		if (last_csv_file_name != NULL)
-			pfree(last_csv_file_name);
-		last_csv_file_name = NULL;
+		file_log_dest_close(&csvlog_file_info);
 	}
-
-	if (filename)
-		pfree(filename);
-	if (csvfilename)
-		pfree(csvfilename);
 
 	update_metainfo_datafile();
 
@@ -1430,6 +1336,22 @@ set_next_rotation_time(void)
 	next_rotation_time = now;
 }
 
+static bool inline write_metainfo_line(FILE *metadata_file, const FileLogDestination *info)
+{
+	if (info->last_file_name != NULL && (Log_destination & info->dest))
+	{
+		if (fprintf(metadata_file, "%s %s\n", info->name, info->last_file_name) < 0)
+		{
+			ereport(LOG,
+					(errcode_for_file_access(),
+					 errmsg("could not write file \"%s\": %m",
+							LOG_METAINFO_DATAFILE_TMP)));
+			return false;
+		}
+	}
+	return true;
+}
+
 /*
  * Store the name of the file(s) where the log collector, when enabled, writes
  * log messages.  Useful for finding the name(s) of the current log file(s)
@@ -1478,31 +1400,13 @@ update_metainfo_datafile(void)
 		return;
 	}
 
-	if (last_file_name && (Log_destination & LOG_DESTINATION_STDERR))
+	if (!write_metainfo_line(fh, &stderr_file_info) ||
+		!write_metainfo_line(fh, &csvlog_file_info))
 	{
-		if (fprintf(fh, "stderr %s\n", last_file_name) < 0)
-		{
-			ereport(LOG,
-					(errcode_for_file_access(),
-					 errmsg("could not write file \"%s\": %m",
-							LOG_METAINFO_DATAFILE_TMP)));
-			fclose(fh);
-			return;
-		}
+		fclose(fh);
+		return;
 	}
 
-	if (last_csv_file_name && (Log_destination & LOG_DESTINATION_CSVLOG))
-	{
-		if (fprintf(fh, "csvlog %s\n", last_csv_file_name) < 0)
-		{
-			ereport(LOG,
-					(errcode_for_file_access(),
-					 errmsg("could not write file \"%s\": %m",
-							LOG_METAINFO_DATAFILE_TMP)));
-			fclose(fh);
-			return;
-		}
-	}
 	fclose(fh);
 
 	if (rename(LOG_METAINFO_DATAFILE_TMP, LOG_METAINFO_DATAFILE) != 0)
@@ -1551,4 +1455,83 @@ sigUsr1Handler(SIGNAL_ARGS)
 	SetLatch(MyLatch);
 
 	errno = save_errno;
+}
+
+static inline bool file_log_dest_should_rotate_for_size(const FileLogDestination *info)
+{
+	if (info->file == NULL)
+		return false;
+
+	return ftell(info->file) >= Log_RotationSize * 1024L;
+}
+
+/*
+ * Checks if a log file should be rotated and if so rotate it.
+ *
+ * If the file is to be rotated and a new log file cannot be opened then return
+ * false. Otherwise return true regardless of whether it was rotated.
+ */
+static bool file_log_dest_rotate(FileLogDestination *info, pg_time_t fntime, bool time_based_rotation, int size_rotation_for)
+{
+	/*
+	 * Decide whether to overwrite or append.  We can overwrite if (a)
+	 * Log_truncate_on_rotation is set, (b) the rotation was triggered by
+	 * elapsed time and not something else, and (c) the computed file name is
+	 * different from what we were previously logging into.
+	 *
+	 * Note: last_file_name should never be NULL here, but if it is, append.
+	 */
+	if (time_based_rotation || (size_rotation_for & info->dest))
+	{
+		FILE *file = NULL;
+		char *filename = logfile_getname(fntime, info->suffix);
+
+		if (Log_truncate_on_rotation
+			&& time_based_rotation
+			&& info->last_file_name != NULL
+			&& strcmp(filename, info->last_file_name) != 0)
+			file = logfile_open(filename, "w", true);
+		else
+			file = logfile_open(filename, "a", true);
+
+		if (file == NULL)
+		{
+			/*
+			 * ENFILE/EMFILE are not too surprising on a busy system; just
+			 * keep using the old file till we manage to get a new one.
+			 * Otherwise, assume something's wrong with Log_directory and stop
+			 * trying to create files.
+			 */
+			if (errno != ENFILE && errno != EMFILE)
+			{
+				ereport(LOG,
+						(errmsg("disabling automatic rotation (use SIGHUP to re-enable)")));
+				rotation_disabled = true;
+			}
+
+			pfree(filename);
+			return false;
+		}
+
+		file_log_dest_close(info);
+		info->file = file;
+		/* instead of pfree'ing filename, remember it for next time */
+		info->last_file_name = filename;
+	}
+
+	return true;
+}
+
+static inline void file_log_dest_close(FileLogDestination *info)
+{
+	if (info->file != NULL)
+	{
+		fclose(info->file);
+		info->file = NULL;
+	}
+	if (info->last_file_name != NULL)
+	{
+		pfree(info->last_file_name);
+		info->last_file_name = NULL;
+	}
 }
