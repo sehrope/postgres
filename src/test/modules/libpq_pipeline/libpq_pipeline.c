@@ -518,6 +518,78 @@ test_disallowed_in_pipeline(PGconn *conn)
 	fprintf(stderr, "ok\n");
 }
 
+/*
+ * Verify that PQexitPipelineMode refuses to leave pipeline mode while a
+ * COPY is in progress, and reports a COPY-shaped error.
+ *
+ * The documented contract is "Returns 0 if in pipeline mode and cannot be
+ * ended yet."  The docs also say COPY is disallowed in pipeline mode, but
+ * only PQsendQuery enforces that client-side; PQsendQueryParams happily
+ * dispatches a COPY through the extended-query protocol, after which the
+ * connection transitions to PGASYNC_COPY_*.  This test exploits that to
+ * reach the COPY arm of the asyncStatus switch in PQexitPipelineMode and
+ * checks its behavior end-to-end.
+ */
+static void
+test_exit_in_copy(PGconn *conn)
+{
+	PGresult   *res;
+	bool		saw_copy_out = false;
+	const char *errmsg;
+
+	fprintf(stderr, "PQexitPipelineMode in COPY... ");
+
+	if (PQenterPipelineMode(conn) != 1)
+		pg_fatal("could not enter pipeline mode: %s", PQerrorMessage(conn));
+
+	if (PQsendQueryParams(conn, "COPY (SELECT 1) TO STDOUT",
+						  0, NULL, NULL, NULL, NULL, 0) != 1)
+		pg_fatal("PQsendQueryParams failed: %s", PQerrorMessage(conn));
+
+	if (PQpipelineSync(conn) != 1)
+		pg_fatal("PQpipelineSync failed: %s", PQerrorMessage(conn));
+
+	while ((res = PQgetResult(conn)) != NULL)
+	{
+		ExecStatusType st = PQresultStatus(res);
+
+		PQclear(res);
+		if (st == PGRES_COPY_OUT)
+		{
+			saw_copy_out = true;
+			break;
+		}
+		if (st == PGRES_FATAL_ERROR)
+			pg_fatal("server rejected COPY in extended-query pipeline; "
+					 "cannot exercise this code path: %s",
+					 PQerrorMessage(conn));
+	}
+	if (!saw_copy_out)
+		pg_fatal("never reached PGRES_COPY_OUT state");
+
+	/* Per docs: must return 0 because we're in COPY and cannot exit. */
+	if (PQexitPipelineMode(conn) != 0)
+		pg_fatal("PQexitPipelineMode returned success while in COPY state");
+
+	errmsg = PQerrorMessage(conn);
+
+	/* The error must describe what's actually wrong (COPY in progress). */
+	if (strstr(errmsg, "while in COPY") == NULL)
+		pg_fatal("expected \"while in COPY\" in error message, got: %s",
+				 errmsg);
+
+	/*
+	 * The COPY arm must not fall through into the queue-empty path: a
+	 * trailing "uncollected results" message indicates the missing return
+	 * after libpq_append_conn_error in the PGASYNC_COPY_* case.
+	 */
+	if (strstr(errmsg, "uncollected results") != NULL)
+		pg_fatal("error stream contains misleading \"uncollected results\" "
+				 "after COPY-arm fall-through: %s", errmsg);
+
+	fprintf(stderr, "ok\n");
+}
+
 static void
 test_multi_pipelines(PGconn *conn)
 {
@@ -2118,6 +2190,7 @@ print_test_list(void)
 {
 	printf("cancel\n");
 	printf("disallowed_in_pipeline\n");
+	printf("exit_in_copy\n");
 	printf("multi_pipelines\n");
 	printf("nosync\n");
 	printf("pipeline_abort\n");
@@ -2225,6 +2298,8 @@ main(int argc, char **argv)
 		test_cancel(conn);
 	else if (strcmp(testname, "disallowed_in_pipeline") == 0)
 		test_disallowed_in_pipeline(conn);
+	else if (strcmp(testname, "exit_in_copy") == 0)
+		test_exit_in_copy(conn);
 	else if (strcmp(testname, "multi_pipelines") == 0)
 		test_multi_pipelines(conn);
 	else if (strcmp(testname, "nosync") == 0)
