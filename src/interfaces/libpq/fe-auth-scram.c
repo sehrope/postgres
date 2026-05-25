@@ -730,7 +730,10 @@ read_server_final_message(fe_scram_state *state, char *input)
 	}
 
 	if (*input != '\0')
+	{
 		libpq_append_conn_error(conn, "malformed SCRAM message (garbage at end of server-final-message)");
+		return false;
+	}
 
 	server_signature_len = pg_b64_dec_len(strlen(encoded_server_signature));
 	decoded_server_signature = malloc(server_signature_len);
