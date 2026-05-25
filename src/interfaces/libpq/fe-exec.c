@@ -3133,6 +3133,7 @@ PQexitPipelineMode(PGconn *conn)
 		case PGASYNC_COPY_OUT:
 		case PGASYNC_COPY_BOTH:
 			libpq_append_conn_error(conn, "cannot exit pipeline mode while in COPY");
+			return 0;
 	}
 
 	/* still work to process */
