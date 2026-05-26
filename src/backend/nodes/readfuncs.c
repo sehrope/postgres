@@ -26,6 +26,7 @@
  */
 #include "postgres.h"
 
+#include "common/string.h"
 #include "miscadmin.h"
 #include "nodes/bitmapset.h"
 #include "nodes/readfuncs.h"
@@ -232,8 +233,9 @@ _readBitmapset(void)
 			elog(ERROR, "unterminated Bitmapset structure");
 		if (length == 1 && token[0] == ')')
 			break;
-		val = (int) strtol(token, &endptr, 10);
-		if (endptr != token + length)
+		errno = 0;
+		val = strtoint(token, &endptr, 10);
+		if (endptr != token + length || errno == ERANGE)
 			elog(ERROR, "unrecognized integer: \"%.*s\"", length, token);
 		result = bms_add_member(result, val);
 	}

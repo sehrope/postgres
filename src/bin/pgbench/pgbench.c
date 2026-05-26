@@ -2995,10 +2995,11 @@ runShellCommand(Variables *variables, char *variable, char **argv, int argc)
 	}
 
 	/* Check whether the result is an integer and assign it to the variable */
-	retval = (int) strtol(res, &endptr, 10);
+	errno = 0;
+	retval = strtoint(res, &endptr, 10);
 	while (*endptr != '\0' && isspace((unsigned char) *endptr))
 		endptr++;
-	if (*res == '\0' || *endptr != '\0')
+	if (*res == '\0' || *endptr != '\0' || errno == ERANGE)
 	{
 		pg_log_error("%s: shell command must return an integer (not \"%s\")", argv[0], res);
 		return false;

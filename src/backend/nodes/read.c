@@ -368,8 +368,9 @@ nodeRead(const char *token, int tok_len)
 							elog(ERROR, "unterminated List structure");
 						if (token[0] == ')')
 							break;
-						val = (int) strtol(token, &endptr, 10);
-						if (endptr != token + tok_len)
+						errno = 0;
+						val = strtoint(token, &endptr, 10);
+						if (endptr != token + tok_len || errno == ERANGE)
 							elog(ERROR, "unrecognized integer: \"%.*s\"",
 								 tok_len, token);
 						l = lappend_int(l, val);
@@ -433,8 +434,9 @@ nodeRead(const char *token, int tok_len)
 							elog(ERROR, "unterminated Bitmapset structure");
 						if (tok_len == 1 && token[0] == ')')
 							break;
-						val = (int) strtol(token, &endptr, 10);
-						if (endptr != token + tok_len)
+						errno = 0;
+						val = strtoint(token, &endptr, 10);
+						if (endptr != token + tok_len || errno == ERANGE)
 							elog(ERROR, "unrecognized integer: \"%.*s\"",
 								 tok_len, token);
 						bms = bms_add_member(bms, val);
