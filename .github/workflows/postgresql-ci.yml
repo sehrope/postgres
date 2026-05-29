@@ -525,7 +525,7 @@ jobs:
         run: |
           macos_major=$(sw_vers -productVersion | sed 's/\..*//')
           pkglist_hash=$(printf '%s' "$MACOS_PACKAGE_LIST" | md5 -q)
-          script_hash=$(md5 -q src/tools/ci/ci_macports_packages.sh)
+          script_hash=$(md5 -q src/tools/ci/ci_macports_install.sh)
           echo "key=macports-${macos_major}-${pkglist_hash}-${script_hash}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
           echo "restore-key=macports-${macos_major}-${pkglist_hash}-${script_hash}-" >> "$GITHUB_OUTPUT"
 
@@ -553,7 +553,7 @@ jobs:
           # limit (shared across all jobs on the runner's IP).
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          sh src/tools/ci/ci_macports_packages.sh $MACOS_PACKAGE_LIST
+          src/tools/ci/ci_macports_install.sh ${MACOS_PACKAGE_LIST}
           # system python doesn't provide headers
           sudo /opt/local/bin/port select python3 python312
           # Make macports install visible to subsequent steps
