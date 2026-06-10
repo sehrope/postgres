@@ -358,8 +358,11 @@ pgaio_uring_shmem_init(void *arg)
 
 			ret = io_uring_queue_init_mem(io_max_concurrency, &context->io_uring_ring, &p, ring_mem_next, ring_mem_remain);
 
-			ring_mem_remain -= ret;
-			ring_mem_next += ret;
+			if (ret >= 0)
+			{
+				ring_mem_remain -= ret;
+				ring_mem_next += ret;
+			}
 		}
 		else
 #endif
