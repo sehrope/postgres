@@ -318,6 +318,30 @@ jobs:
           key: ccache${{env.CACHE_PREFIX_BRANCH}}${{env.CACHE_SUFFIX}}
           restore-keys: ccache${{env.CACHE_PREFIX_BRANCH}}
 
+      # Put the meson build directory on a tmpfs RAM disk. It holds not just
+      # the build artifacts but, more importantly, every test data directory
+      # (initdb clusters, WAL, temp tablespaces, dump/restore scratch) that
+      # check-world creates under build/testrun, build/tmp_install and
+      # build/runningcheck. The test suite is dominated by metadata-heavy
+      # operations on thousands of small, short-lived files, so serving those
+      # from RAM rather than the runner's disk noticeably reduces test
+      # runtime.
+      #
+      # Mounted before the "Prepare workspace" step so that step's
+      # `chown -R postgres .` also grants the postgres user ownership of the
+      # (still empty) tmpfs mountpoint, letting `meson setup` populate it.
+      #
+      # The container is started with --privileged, so mounting is permitted.
+      # size= is an upper bound, not a reservation: tmpfs only consumes RAM
+      # for data actually written, so the cap merely protects the ~16GB runner
+      # from a runaway test filling memory and triggering the OOM killer.
+      - &linux_tmpfs_build_step
+        name: "Mount tmpfs on build/ (RAM disk for build + tests)"
+        run: |
+          mkdir build
+          mount -t tmpfs -o size=10g tmpfs "$(pwd)/build"
+          df -h "$(pwd)/build"
+
       - &linux_prepare_workspace_step
         name: Prepare workspace
         run: |
@@ -557,6 +581,7 @@ jobs:
       - *checkout_step
       - *ccache_restore_default_step
       - *ccache_restore_branch_step
+      - *linux_tmpfs_build_step
       - *linux_prepare_workspace_step
 
       - name: Configure
@@ -647,6 +672,7 @@ jobs:
       - *checkout_step
       - *ccache_restore_default_step
       - *ccache_restore_branch_step
+      - *linux_tmpfs_build_step
       - *linux_prepare_workspace_step
 
       - name: Configure
