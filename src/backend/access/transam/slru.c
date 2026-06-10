@@ -1068,7 +1068,8 @@ SlruPhysicalWritePage(SlruDesc *ctl, int64 pageno, int slotno, SlruWriteAll fdat
 				pgstat_report_wait_end();
 				slru_errcause = SLRU_FSYNC_FAILED;
 				slru_errno = errno;
-				CloseTransientFile(fd);
+				if (!fdata)
+					CloseTransientFile(fd);
 				return false;
 			}
 			pgstat_report_wait_end();
