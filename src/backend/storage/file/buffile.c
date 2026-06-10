@@ -850,6 +850,9 @@ BufFileTell(BufFile *file, int *fileno, pgoff_t *offset)
 int
 BufFileSeekBlock(BufFile *file, int64 blknum)
 {
+	if (blknum / BUFFILE_SEG_SIZE > PG_INT32_MAX)
+		return EOF;
+
 	return BufFileSeek(file,
 					   (int) (blknum / BUFFILE_SEG_SIZE),
 					   (pgoff_t) (blknum % BUFFILE_SEG_SIZE) * BLCKSZ,
