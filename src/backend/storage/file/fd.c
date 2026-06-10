@@ -603,8 +603,8 @@ retry:
 		 * (msync()), and then remove the mapping again (munmap()).
 		 */
 
-		/* mmap() needs actual length if we want to map whole file */
-		if (offset == 0 && nbytes == 0)
+		/* mmap() needs actual length if we want to map to end of file */
+		if (nbytes == 0)
 		{
 			nbytes = lseek(fd, 0, SEEK_END);
 			if (nbytes < 0)
@@ -614,6 +614,7 @@ retry:
 						 errmsg("could not determine dirty data size: %m")));
 				return;
 			}
+			nbytes -= offset;
 		}
 
 		/*
