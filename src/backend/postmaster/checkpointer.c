@@ -721,7 +721,7 @@ CheckArchiveTimeout(void)
 	now = (pg_time_t) time(NULL);
 
 	/* First we do a quick check using possibly-stale local state. */
-	if ((int) (now - last_xlog_switch_time) < XLogArchiveTimeout)
+	if (now - last_xlog_switch_time < XLogArchiveTimeout)
 		return;
 
 	/*
@@ -733,7 +733,7 @@ CheckArchiveTimeout(void)
 	last_xlog_switch_time = Max(last_xlog_switch_time, last_time);
 
 	/* Now we can do the real checks */
-	if ((int) (now - last_xlog_switch_time) >= XLogArchiveTimeout)
+	if (now - last_xlog_switch_time >= XLogArchiveTimeout)
 	{
 		/*
 		 * Switch segment only when "important" WAL has been logged since the
