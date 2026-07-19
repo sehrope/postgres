@@ -806,6 +806,84 @@ pglz_decompress(const char *source, int32 slen, char *dest,
 		unsigned char ctrl = *sp++;
 		int			ctrlc;
 
+		/*
+		 * Fast path: when at least 24 bytes of compressed input remain
+		 * after the control byte, a full 8-item group cannot run out of
+		 * input (worst case is 8 three-byte tags), so all per-item input
+		 * bounds checks can be dropped.  Output bounds are still checked:
+		 * once per literal (they write one byte each) and through the
+		 * Min() clamp for tags.  Tag decoding and the copy loops mirror
+		 * the fully checked path below, which keeps the detailed
+		 * explanatory comments.
+		 */
+		if (srcend - sp >= 24)
+		{
+			for (ctrlc = 0; ctrlc < 8 && dp < destend; ctrlc++, ctrl >>= 1)
+			{
+				if (ctrl & 1)
+				{
+					int32		len;
+					int32		off;
+
+					len = (sp[0] & 0x0f) + 3;
+					off = ((sp[0] & 0xf0) << 4) | sp[1];
+					sp += 2;
+					if (len == 18)
+						len += *sp++;
+
+					if (unlikely(off == 0 ||
+								 off > (dp - (unsigned char *) dest)))
+						return -1;
+
+					len = Min(len, destend - dp);
+
+					if (off >= 8 && len <= 16 && destend - dp >= 24)
+					{
+						/*
+						 * Short match, copy distance of at least 8 and
+						 * enough output slack: two fixed 8-byte chunks
+						 * cover any len up to 16 without a length-
+						 * dependent loop (the second chunk's source is
+						 * fully written by the first when off == 8).
+						 * The overshoot beyond len stays below destend
+						 * and is overwritten by subsequent output.
+						 * Long matches stay on the doubling path below,
+						 * whose few large memcpy calls beat chunking.
+						 */
+						memcpy(dp, dp - off, 8);
+						memcpy(dp + 8, dp - off + 8, 8);
+						dp += len;
+					}
+					else
+					{
+						/*
+						 * Overlapping with distance below 8, long, or
+						 * tight on output space: byte-exact doubling
+						 * technique (explained in the checked path
+						 * below).
+						 */
+						while (off < len)
+						{
+							memcpy(dp, dp - off, off);
+							len -= off;
+							dp += off;
+							off += off;
+						}
+						memcpy(dp, dp - off, len);
+						dp += len;
+					}
+				}
+				else
+				{
+					/*
+					 * An unset control bit means LITERAL BYTE.
+					 */
+					*dp++ = *sp++;
+				}
+			}
+			continue;
+		}
+
 		for (ctrlc = 0; ctrlc < 8 && sp < srcend && dp < destend; ctrlc++)
 		{
 			if (ctrl & 1)
