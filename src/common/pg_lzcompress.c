@@ -199,6 +199,25 @@
 #define PGLZ_HISTORY_SIZE		4096
 #define PGLZ_MAX_MATCH			273
 
+/*
+ * History insertion policy inside emitted matches: positions in the
+ * interior of a long match rarely start future matches, so insert only
+ * every PGLZ_HIST_STRIDE-th interior position (must be a power of 2),
+ * but always the first and last PGLZ_HIST_TAIL positions.
+ */
+#define PGLZ_HIST_STRIDE		4
+#define PGLZ_HIST_TAIL			4
+
+/*
+ * Acceleration on incompressible data: after a run of consecutive probe
+ * misses, emit literals without probing or inserting history.  The skip
+ * length grows by one byte per 2^PGLZ_SKIP_TRIGGER misses (LZ4 uses the same trigger) and is capped
+ * at PGLZ_SKIP_MAX so a compressible region following an incompressible
+ * one is entered at most that many bytes late.
+ */
+#define PGLZ_SKIP_TRIGGER		7
+#define PGLZ_SKIP_MAX			15
+
 
 /* ----------
  * The provided standard strategies
@@ -566,6 +585,8 @@ pglz_compress(const char *source, int32 slen, char *dest,
 	unsigned char ctrlb = 0;
 	unsigned char ctrl = 0;
 	bool		found_match = false;
+	int32		miss_run = 0;	/* consecutive probe misses */
+	int32		skip = 0;		/* accelerated literals still to emit */
 	int32		match_len;
 	int32		match_off;
 	int32		good_match;
@@ -675,32 +696,61 @@ pglz_compress(const char *source, int32 slen, char *dest,
 			return -1;
 
 		/*
-		 * Try to find a match in the history
+		 * Try to find a match in the history, unless we are inside an
+		 * accelerated skip run over incompressible data.
 		 */
-		if (pglz_find_match(dp, dend, &match_len,
+		if (skip == 0 &&
+			pglz_find_match(dp, dend, &match_len,
 							&match_off, good_match, good_drop, hshift, pos))
 		{
 			/*
 			 * Create the tag and add history entries for all matched
 			 * characters.
 			 */
+			int32		i;
+
 			pglz_out_tag(ctrlp, ctrlb, ctrl, bp, match_len, match_off);
-			while (match_len--)
+
+			/*
+			 * Add history entries for the matched region, thinned out per
+			 * the PGLZ_HIST_STRIDE/PGLZ_HIST_TAIL policy above.  pos must
+			 * advance for every input byte regardless: it is the absolute
+			 * input position that the distance validation in
+			 * pglz_find_match relies on.
+			 */
+			for (i = 0; i < match_len; i++)
 			{
-				pglz_hist_add(dp, dend, pos, hshift);
+				if (i < PGLZ_HIST_TAIL ||
+					i >= match_len - PGLZ_HIST_TAIL ||
+					(i & (PGLZ_HIST_STRIDE - 1)) == 0)
+					pglz_hist_add(dp, dend, pos, hshift);
 				pos++;
 				dp++;			/* Do not do this ++ in the line above! */
 				/* The macro would do it four times - Jan.  */
 			}
 			found_match = true;
+			miss_run = 0;
 		}
 		else
 		{
 			/*
-			 * No match found. Copy one literal byte.
+			 * No match found (or accelerated skip run in progress).  Copy
+			 * one literal byte.  Each literal still passes through the
+			 * loop top, so the result_max and first_success_by checks
+			 * fire exactly as before.
 			 */
 			pglz_out_literal(ctrlp, ctrlb, ctrl, bp, *dp);
-			pglz_hist_add(dp, dend, pos, hshift);
+			if (skip > 0)
+			{
+				/* accelerated literal: no probe, no history entry */
+				skip--;
+			}
+			else
+			{
+				pglz_hist_add(dp, dend, pos, hshift);
+				skip = Min(miss_run >> PGLZ_SKIP_TRIGGER, PGLZ_SKIP_MAX);
+				miss_run++;
+			}
 			pos++;
 			dp++;				/* Do not do this ++ in the line above! */
 			/* The macro would do it four times - Jan.  */
