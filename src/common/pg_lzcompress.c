@@ -281,17 +281,31 @@ static uint32 hist_prev[PGLZ_HISTORY_SIZE];
  *		Computes the history table slot for the lookup by the next 4
  *		characters in the input.
  *
+ * The 4 input bytes are read as one 32-bit load (memcpy compiles to a
+ * single unaligned load) and mixed with a Fibonacci multiplicative hash;
+ * the top bits of the product are the best mixed, so the slot is taken
+ * from there.  hshift is 32 minus the log2 of the table size.  Note the
+ * hash value therefore depends on byte order: match choices can differ
+ * across platforms, but any choice produces format-valid output.
+ *
  * NB: because we use the next 4 characters, we are not guaranteed to
  * find 3-character matches; they very possibly will be in the wrong
  * hash list.  This seems an acceptable tradeoff for spreading out the
- * hash keys more.
+ * hash keys more.  With fewer than 4 bytes left, fall back to the first
+ * byte alone; it always fits any table size used here.
  * ----------
  */
-#define pglz_hist_idx(_s,_e, _mask) (										\
-			((((_e) - (_s)) < 4) ? (int) (_s)[0] :							\
-			 (((_s)[0] << 6) ^ ((_s)[1] << 4) ^								\
-			  ((_s)[2] << 2) ^ (_s)[3])) & (_mask)				\
-		)
+static inline int
+pglz_hist_idx(const char *s, const char *e, int hshift)
+{
+	uint32		v;
+
+	if (e - s < 4)
+		return (unsigned char) s[0];
+
+	memcpy(&v, s, 4);
+	return (int) ((v * 2654435761u) >> hshift);
+}
 
 
 /* ----------
@@ -308,9 +322,9 @@ static uint32 hist_prev[PGLZ_HISTORY_SIZE];
  * NOTE: beware of multiple evaluations of macro's arguments.
  * ----------
  */
-#define pglz_hist_add(_s,_e,_pos, _mask)	\
+#define pglz_hist_add(_s,_e,_pos, _hshift)	\
 do {									\
-			int __hindex = pglz_hist_idx((_s),(_e), (_mask));				\
+			int __hindex = pglz_hist_idx((_s),(_e), (_hshift));				\
 			hist_prev[(_pos) & (PGLZ_HISTORY_SIZE - 1)] = hist_head[__hindex]; \
 			hist_head[__hindex] = (uint32) (_pos);							\
 } while (0)
@@ -445,7 +459,7 @@ pglz_match_length(const char *ip, const char *hp, const char *end, int32 len)
  */
 static inline int
 pglz_find_match(const char *input, const char *end,
-				int *lenp, int *offp, int good_match, int good_drop, int mask,
+				int *lenp, int *offp, int good_match, int good_drop, int hshift,
 				uint32 pos)
 {
 	int32		len = 0;
@@ -460,7 +474,7 @@ pglz_find_match(const char *input, const char *end,
 	 * fails the range check below, exactly like the old list's invalid
 	 * entry did.
 	 */
-	dist = (int32) (pos - hist_head[pglz_hist_idx(input, end, mask)]);
+	dist = (int32) (pos - hist_head[pglz_hist_idx(input, end, hshift)]);
 
 	/*
 	 * Traverse the history chain until a good enough match is found.  A
@@ -574,7 +588,7 @@ pglz_compress(const char *source, int32 slen, char *dest,
 	int32		result_max;
 	int32		need_rate;
 	int			hashsz;
-	int			mask;
+	int			hshift;
 
 	/*
 	 * Our fallback strategy is the default.
@@ -641,7 +655,7 @@ pglz_compress(const char *source, int32 slen, char *dest,
 		hashsz = 4096;
 	else
 		hashsz = 8192;
-	mask = hashsz - 1;
+	hshift = 32 - pg_leftmost_one_pos32(hashsz);
 
 	/*
 	 * Initialize the history heads to empty.  We do not need to zero the
@@ -678,7 +692,7 @@ pglz_compress(const char *source, int32 slen, char *dest,
 		 * Try to find a match in the history
 		 */
 		if (pglz_find_match(dp, dend, &match_len,
-							&match_off, good_match, good_drop, mask, pos))
+							&match_off, good_match, good_drop, hshift, pos))
 		{
 			/*
 			 * Create the tag and add history entries for all matched
@@ -687,7 +701,7 @@ pglz_compress(const char *source, int32 slen, char *dest,
 			pglz_out_tag(ctrlp, ctrlb, ctrl, bp, match_len, match_off);
 			while (match_len--)
 			{
-				pglz_hist_add(dp, dend, pos, mask);
+				pglz_hist_add(dp, dend, pos, hshift);
 				pos++;
 				dp++;			/* Do not do this ++ in the line above! */
 				/* The macro would do it four times - Jan.  */
@@ -700,7 +714,7 @@ pglz_compress(const char *source, int32 slen, char *dest,
 			 * No match found. Copy one literal byte.
 			 */
 			pglz_out_literal(ctrlp, ctrlb, ctrl, bp, *dp);
-			pglz_hist_add(dp, dend, pos, mask);
+			pglz_hist_add(dp, dend, pos, hshift);
 			pos++;
 			dp++;				/* Do not do this ++ in the line above! */
 			/* The macro would do it four times - Jan.  */
