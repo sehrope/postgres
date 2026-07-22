@@ -208,6 +208,18 @@ StaticAssertDecl((PGLZ_HISTORY_SIZE & (PGLZ_HISTORY_SIZE - 1)) == 0,
 StaticAssertDecl(PGLZ_HISTORY_SIZE >= 0x0fff,
 				 "PGLZ_HISTORY_SIZE must cover the maximum tag offset");
 
+/*
+ * Acceleration on incompressible data: after a run of consecutive probe
+ * misses, emit literals without probing or inserting history.  The skip
+ * length grows by one byte per 2^PGLZ_SKIP_TRIGGER misses and is capped
+ * at PGLZ_SKIP_MAX, so a compressible region following an incompressible
+ * one is entered at most that many bytes late.  (LZ4 accelerates the
+ * same way, but with a faster trigger -- one byte per 64 misses -- and
+ * no cap; pglz's small window favors the conservative setting.)
+ */
+#define PGLZ_SKIP_TRIGGER		7
+#define PGLZ_SKIP_MAX			15
+
 
 /* ----------
  * The provided standard strategies
@@ -580,6 +592,8 @@ pglz_compress(const char *source, int32 slen, char *dest,
 	unsigned char ctrlb = 0;
 	unsigned char ctrl = 0;
 	bool		found_match = false;
+	int32		miss_run = 0;	/* consecutive probe misses */
+	int32		skip = 0;		/* accelerated literals still to emit */
 	int32		match_len;
 	int32		match_off;
 	int32		good_match;
@@ -689,9 +703,11 @@ pglz_compress(const char *source, int32 slen, char *dest,
 			return -1;
 
 		/*
-		 * Try to find a match in the history
+		 * Try to find a match in the history, unless we are inside an
+		 * accelerated skip run over incompressible data.
 		 */
-		if (pglz_find_match(dp, dend, &match_len,
+		if (skip == 0 &&
+			pglz_find_match(dp, dend, &match_len,
 							&match_off, good_match, good_drop, hshift, pos))
 		{
 			/*
@@ -707,14 +723,28 @@ pglz_compress(const char *source, int32 slen, char *dest,
 				/* The macro would do it four times - Jan.  */
 			}
 			found_match = true;
+			miss_run = 0;
 		}
 		else
 		{
 			/*
-			 * No match found. Copy one literal byte.
+			 * No match found (or accelerated skip run in progress).  Copy
+			 * one literal byte.  Each literal still passes through the
+			 * loop top, so the result_max and first_success_by checks
+			 * fire exactly as before.
 			 */
 			pglz_out_literal(ctrlp, ctrlb, ctrl, bp, *dp);
-			pglz_hist_add(dp, dend, pos, hshift);
+			if (skip > 0)
+			{
+				/* accelerated literal: no probe, no history entry */
+				skip--;
+			}
+			else
+			{
+				pglz_hist_add(dp, dend, pos, hshift);
+				skip = Min(miss_run >> PGLZ_SKIP_TRIGGER, PGLZ_SKIP_MAX);
+				miss_run++;
+			}
 			pos++;
 			dp++;				/* Do not do this ++ in the line above! */
 			/* The macro would do it four times - Jan.  */
