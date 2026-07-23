@@ -187,6 +187,7 @@
 
 #include "common/pg_lzcompress.h"
 #include "port/pg_bitutils.h"
+#include "port/pg_bswap.h"
 
 
 /* ----------
@@ -198,6 +199,9 @@
 #define PGLZ_MAX_MATCH			273
 #define PGLZ_MAX_OFF			0x0fff	/* exclusive max offset; kept strict
 										 * for byte-compatibility */
+
+/* Odd multiplier for Fibonacci hashing, 0x9E3779B1 ~ 2^32 / golden ratio */
+#define PGLZ_HASH_MULTIPLIER	2654435761u
 
 /* The ring indexing and the empty-slot bias depend on these relations. */
 StaticAssertDecl((PGLZ_HISTORY_SIZE & (PGLZ_HISTORY_SIZE - 1)) == 0,
@@ -264,17 +268,33 @@ static uint32 hist_prev[PGLZ_HISTORY_SIZE];
  *		Computes the history table slot for the lookup by the next 4
  *		characters in the input.
  *
+ * The 4 input bytes are read as one 32-bit load (via memcpy, so alignment is
+ * not assumed) and normalized to little-endian, so the hash -- and hence the
+ * compressed output -- is identical on every architecture.  The top bits of
+ * the multiplicative hash are the best mixed, so hshift, 32 minus the log2 of
+ * the table size, shifts the slot down from there.  With fewer than 4 bytes
+ * left we hash the first byte alone; it fits any table size used here.
+ *
  * NB: because we use the next 4 characters, we are not guaranteed to
  * find 3-character matches; they very possibly will be in the wrong
  * hash list.  This seems an acceptable tradeoff for spreading out the
  * hash keys more.
  * ----------
  */
-#define pglz_hist_idx(_s,_e, _mask) (										\
-			((((_e) - (_s)) < 4) ? (int) (_s)[0] :							\
-			 (((_s)[0] << 6) ^ ((_s)[1] << 4) ^								\
-			  ((_s)[2] << 2) ^ (_s)[3])) & (_mask)				\
-		)
+static inline int
+pglz_hist_idx(const char *s, const char *e, int hshift)
+{
+	uint32		v;
+
+	if (e - s < 4)
+		return (unsigned char) s[0];
+
+	memcpy(&v, s, 4);
+#ifdef WORDS_BIGENDIAN
+	v = pg_bswap32(v);
+#endif
+	return (int) ((v * PGLZ_HASH_MULTIPLIER) >> hshift);
+}
 
 
 /* ----------
@@ -287,9 +307,9 @@ static uint32 hist_prev[PGLZ_HISTORY_SIZE];
  * ----------
  */
 static inline void
-pglz_hist_add(const char *s, const char *e, uint32 pos, int mask)
+pglz_hist_add(const char *s, const char *e, uint32 pos, int hshift)
 {
-	int			hindex = pglz_hist_idx(s, e, mask);
+	int			hindex = pglz_hist_idx(s, e, hshift);
 
 	hist_prev[pos & (PGLZ_HISTORY_SIZE - 1)] = hist_head[hindex];
 	hist_head[hindex] = pos;
@@ -419,7 +439,7 @@ pglz_match_length(const char *ip, const char *hp, const char *end, int32 len)
  */
 static inline int
 pglz_find_match(const char *input, const char *end,
-				int *lenp, int *offp, int good_match, int good_drop, int mask,
+				int *lenp, int *offp, int good_match, int good_drop, int hshift,
 				uint32 pos)
 {
 	int32		len = 0;
@@ -433,7 +453,7 @@ pglz_find_match(const char *input, const char *end,
 	 * biased (see pglz_compress), so an empty (zero) head slot yields a
 	 * distance outside that range, just as the old invalid entry did.
 	 */
-	dist = pos - hist_head[pglz_hist_idx(input, end, mask)];
+	dist = pos - hist_head[pglz_hist_idx(input, end, hshift)];
 	while (dist > 0 && dist < PGLZ_MAX_OFF)
 	{
 		const char *ip = input;
@@ -538,7 +558,7 @@ pglz_compress(const char *source, int32 slen, char *dest,
 	int32		result_max;
 	int32		need_rate;
 	int			hashsz;
-	int			mask;
+	int			hshift;
 
 	/*
 	 * Our fallback strategy is the default.
@@ -605,7 +625,7 @@ pglz_compress(const char *source, int32 slen, char *dest,
 		hashsz = 4096;
 	else
 		hashsz = 8192;
-	mask = hashsz - 1;
+	hshift = 32 - pg_leftmost_one_pos32(hashsz);
 
 	/*
 	 * Initialize the history lists to empty.  We do not need to zero the
@@ -641,7 +661,7 @@ pglz_compress(const char *source, int32 slen, char *dest,
 		 * Try to find a match in the history
 		 */
 		if (pglz_find_match(dp, dend, &match_len,
-							&match_off, good_match, good_drop, mask, pos))
+							&match_off, good_match, good_drop, hshift, pos))
 		{
 			/*
 			 * Create the tag and add history entries for all matched
@@ -650,7 +670,7 @@ pglz_compress(const char *source, int32 slen, char *dest,
 			pglz_out_tag(ctrlp, ctrlb, ctrl, bp, match_len, match_off);
 			while (match_len--)
 			{
-				pglz_hist_add(dp, dend, pos, mask);
+				pglz_hist_add(dp, dend, pos, hshift);
 				pos++;
 				dp++;
 			}
@@ -662,7 +682,7 @@ pglz_compress(const char *source, int32 slen, char *dest,
 			 * No match found. Copy one literal byte.
 			 */
 			pglz_out_literal(ctrlp, ctrlb, ctrl, bp, *dp);
-			pglz_hist_add(dp, dend, pos, mask);
+			pglz_hist_add(dp, dend, pos, hshift);
 			pos++;
 			dp++;
 		}
