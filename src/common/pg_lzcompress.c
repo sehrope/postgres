@@ -186,6 +186,7 @@
 #include <limits.h>
 
 #include "common/pg_lzcompress.h"
+#include "port/pg_bitutils.h"
 
 
 /* ----------
@@ -356,6 +357,59 @@ do { \
 
 
 /* ----------
+ * pglz_match_length -
+ *
+ *		Extend a match between ip and hp, whose first len bytes are already
+ *		known to be equal, until the first mismatch, end, or PGLZ_MAX_MATCH,
+ *		whichever comes first.  Returns the total match length.
+ *
+ * The bulk of the comparison is done 8 bytes at a time: the XOR of two 8-byte
+ * loads is zero iff all 8 bytes are equal, and if not, the lowest set bit
+ * (highest on big-endian) pinpoints the first differing byte.  memcpy avoids
+ * assuming alignment; compilers turn it into a single load.  hp always trails
+ * ip, so end - ip >= 8 bounds both loads.  A byte-wise loop handles the tail.
+ * ----------
+ */
+static inline int32
+pglz_match_length(const char *ip, const char *hp, const char *end, int32 len)
+{
+	ip += len;
+	hp += len;
+
+	while (end - ip >= 8 && len <= PGLZ_MAX_MATCH - 8)
+	{
+		uint64		iw;
+		uint64		hw;
+		uint64		diff;
+
+		memcpy(&iw, ip, 8);
+		memcpy(&hw, hp, 8);
+		diff = iw ^ hw;
+		if (diff != 0)
+		{
+#ifdef WORDS_BIGENDIAN
+			return len + ((63 - pg_leftmost_one_pos64(diff)) >> 3);
+#else
+			return len + (pg_rightmost_one_pos64(diff) >> 3);
+#endif
+		}
+		len += 8;
+		ip += 8;
+		hp += 8;
+	}
+
+	while (ip < end && *ip == *hp && len < PGLZ_MAX_MATCH)
+	{
+		len++;
+		ip++;
+		hp++;
+	}
+
+	return len;
+}
+
+
+/* ----------
  * pglz_find_match -
  *
  *		Lookup the history table if the actual input stream matches
@@ -392,34 +446,17 @@ pglz_find_match(const char *input, const char *end,
 		 * best so far. And if we already have a match of 16 or more bytes,
 		 * it's worth the call overhead to use memcmp() to check if this match
 		 * is equal for the same size. After that we must fallback to
-		 * character by character comparison to know the exact position where
-		 * the diff occurred.
+		 * pglz_match_length() to know the exact position where the diff
+		 * occurred.
 		 */
 		thislen = 0;
 		if (len >= 16)
 		{
 			if (memcmp(ip, hp, len) == 0)
-			{
-				thislen = len;
-				ip += len;
-				hp += len;
-				while (ip < end && *ip == *hp && thislen < PGLZ_MAX_MATCH)
-				{
-					thislen++;
-					ip++;
-					hp++;
-				}
-			}
+				thislen = pglz_match_length(ip, hp, end, len);
 		}
 		else
-		{
-			while (ip < end && *ip == *hp && thislen < PGLZ_MAX_MATCH)
-			{
-				thislen++;
-				ip++;
-				hp++;
-			}
-		}
+			thislen = pglz_match_length(ip, hp, end, 0);
 
 		/*
 		 * Remember this match as the best (if it is)
