@@ -195,25 +195,14 @@
 #define PGLZ_MAX_HISTORY_LISTS	8192	/* must be power of 2 */
 #define PGLZ_HISTORY_SIZE		4096
 #define PGLZ_MAX_MATCH			273
+#define PGLZ_MAX_OFF			0x0fff	/* exclusive max offset; kept strict
+										 * for byte-compatibility */
 
-
-/* ----------
- * PGLZ_HistEntry -
- *
- *		Linked list for the backward history lookup
- *
- * All the entries sharing a hash key are linked in a doubly linked list.
- * This makes it easy to remove an entry when it's time to recycle it
- * (because it's more than 4K positions old).
- * ----------
- */
-typedef struct PGLZ_HistEntry
-{
-	struct PGLZ_HistEntry *next;	/* links for my hash key's list */
-	struct PGLZ_HistEntry *prev;
-	int			hindex;			/* my current hash key */
-	const char *pos;			/* my input position */
-} PGLZ_HistEntry;
+/* The ring indexing and the empty-slot bias depend on these relations. */
+StaticAssertDecl((PGLZ_HISTORY_SIZE & (PGLZ_HISTORY_SIZE - 1)) == 0,
+				 "PGLZ_HISTORY_SIZE must be a power of 2");
+StaticAssertDecl(PGLZ_HISTORY_SIZE >= PGLZ_MAX_OFF,
+				 "PGLZ_HISTORY_SIZE must cover the maximum tag offset");
 
 
 /* ----------
@@ -250,17 +239,23 @@ const PGLZ_Strategy *const PGLZ_strategy_always = &strategy_always_data;
 
 /* ----------
  * Statically allocated work arrays for history
+ *
+ * hist_head[h] holds the biased input position (see pglz_compress) of the
+ * most recent occurrence of hash h; hist_prev[p & (PGLZ_HISTORY_SIZE - 1)]
+ * holds the previous position with the same hash as position p.  A list is
+ * walked as back-distances from the current position, and a link is followed
+ * only while its distance is a usable tag offset, so stale, overwritten and
+ * never-written entries fail that check and nothing has to be delinked or
+ * recycled.
+ *
+ * Positions are stored at full width rather than truncated to 16 bits:
+ * truncated, a link more than 65536 back would wrap to a small in-window
+ * distance, pass validation, and send the walk into unrelated data instead
+ * of stopping.
  * ----------
  */
-static int16 hist_start[PGLZ_MAX_HISTORY_LISTS];
-static PGLZ_HistEntry hist_entries[PGLZ_HISTORY_SIZE + 1];
-
-/*
- * Element 0 in hist_entries is unused, and means 'invalid'. Likewise,
- * INVALID_ENTRY_PTR in next/prev pointers mean 'invalid'.
- */
-#define INVALID_ENTRY			0
-#define INVALID_ENTRY_PTR		(&hist_entries[INVALID_ENTRY])
+static uint32 hist_head[PGLZ_MAX_HISTORY_LISTS];
+static uint32 hist_prev[PGLZ_HISTORY_SIZE];
 
 /* ----------
  * pglz_hist_idx -
@@ -286,45 +281,18 @@ static PGLZ_HistEntry hist_entries[PGLZ_HISTORY_SIZE + 1];
  *
  *		Adds a new entry to the history table.
  *
- * If _recycle is true, then we are recycling a previously used entry,
- * and must first delink it from its old hashcode's linked list.
- *
- * NOTE: beware of multiple evaluations of macro's arguments, and note that
- * _hn and _recycle are modified in the macro.
+ * pos is the biased input position of s; the caller must increment it by
+ * one for every byte added.
  * ----------
  */
-#define pglz_hist_add(_hs,_he,_hn,_recycle,_s,_e, _mask)	\
-do {									\
-			int __hindex = pglz_hist_idx((_s),(_e), (_mask));				\
-			int16 *__myhsp = &(_hs)[__hindex];								\
-			PGLZ_HistEntry *__myhe = &(_he)[_hn];							\
-			if (_recycle) {													\
-				if (__myhe->prev == NULL)									\
-					(_hs)[__myhe->hindex] = __myhe->next - (_he);			\
-				else														\
-					__myhe->prev->next = __myhe->next;						\
-				if (__myhe->next != NULL)									\
-					__myhe->next->prev = __myhe->prev;						\
-			}																\
-			__myhe->next = &(_he)[*__myhsp];								\
-			__myhe->prev = NULL;											\
-			__myhe->hindex = __hindex;										\
-			__myhe->pos  = (_s);											\
-			/* If there was an existing entry in this hash slot, link */	\
-			/* this new entry to it. However, the 0th entry in the */		\
-			/* entries table is unused, so we can freely scribble on it. */ \
-			/* So don't bother checking if the slot was used - we'll */		\
-			/* scribble on the unused entry if it was not, but that's */	\
-			/* harmless. Avoiding the branch in this critical path */		\
-			/* speeds this up a little bit. */								\
-			/* if (*__myhsp != INVALID_ENTRY) */							\
-				(_he)[(*__myhsp)].prev = __myhe;							\
-			*__myhsp = _hn;													\
-			if (++(_hn) >= PGLZ_HISTORY_SIZE + 1) {							\
-				(_hn) = 1;													\
-				(_recycle) = true;											\
-			}																\
-} while (0)
+static inline void
+pglz_hist_add(const char *s, const char *e, uint32 pos, int mask)
+{
+	int			hindex = pglz_hist_idx(s, e, mask);
+
+	hist_prev[pos & (PGLZ_HISTORY_SIZE - 1)] = hist_head[hindex];
+	hist_head[hindex] = pos;
+}
 
 
 /* ----------
@@ -396,32 +364,28 @@ do { \
  * ----------
  */
 static inline int
-pglz_find_match(int16 *hstart, const char *input, const char *end,
-				int *lenp, int *offp, int good_match, int good_drop, int mask)
+pglz_find_match(const char *input, const char *end,
+				int *lenp, int *offp, int good_match, int good_drop, int mask,
+				uint32 pos)
 {
-	PGLZ_HistEntry *hent;
-	int16		hentno;
 	int32		len = 0;
 	int32		off = 0;
+	uint32		dist;
 
 	/*
 	 * Traverse the linked history list until a good enough match is found.
+	 * Links are walked as back-distances from the current position, and are
+	 * usable only while the distance is below PGLZ_MAX_OFF.  Positions are
+	 * biased (see pglz_compress), so an empty (zero) head slot yields a
+	 * distance outside that range, just as the old invalid entry did.
 	 */
-	hentno = hstart[pglz_hist_idx(input, end, mask)];
-	hent = &hist_entries[hentno];
-	while (hent != INVALID_ENTRY_PTR)
+	dist = pos - hist_head[pglz_hist_idx(input, end, mask)];
+	while (dist > 0 && dist < PGLZ_MAX_OFF)
 	{
 		const char *ip = input;
-		const char *hp = hent->pos;
-		int32		thisoff;
+		const char *hp = input - dist;
 		int32		thislen;
-
-		/*
-		 * Stop if the offset does not fit into our tag anymore.
-		 */
-		thisoff = ip - hp;
-		if (thisoff >= 0x0fff)
-			break;
+		uint32		nextdist;
 
 		/*
 		 * Determine length of match. A better match must be larger than the
@@ -463,19 +427,27 @@ pglz_find_match(int16 *hstart, const char *input, const char *end,
 		if (thislen > len)
 		{
 			len = thislen;
-			off = thisoff;
+			off = (int32) dist;
 		}
 
 		/*
 		 * Advance to the next history entry
+		 *
+		 * dist < PGLZ_HISTORY_SIZE, so the ring slot for (pos - dist) still
+		 * describes that position.  A stored position is always strictly
+		 * older, so the walk cannot loop; the check only guards against a
+		 * corrupted array.
 		 */
-		hent = hent->next;
+		nextdist = pos - hist_prev[(pos - dist) & (PGLZ_HISTORY_SIZE - 1)];
+		if (nextdist <= dist)
+			break;
+		dist = nextdist;
 
 		/*
 		 * Be happy with lesser good matches the more entries we visited. But
 		 * no point in doing calculation if we're at end of list.
 		 */
-		if (hent != INVALID_ENTRY_PTR)
+		if (dist < PGLZ_MAX_OFF)
 		{
 			if (len >= good_match)
 				break;
@@ -511,8 +483,9 @@ pglz_compress(const char *source, int32 slen, char *dest,
 {
 	unsigned char *bp = (unsigned char *) dest;
 	unsigned char *bstart = bp;
-	int			hist_next = 1;
-	bool		hist_recycle = false;
+	uint32		pos = PGLZ_HISTORY_SIZE;	/* biased input position of dp;
+											 * the bias makes empty hist_head
+											 * slots fail the distance check */
 	const char *dp = source;
 	const char *dend = source + slen;
 	unsigned char ctrl_dummy = 0;
@@ -599,9 +572,9 @@ pglz_compress(const char *source, int32 slen, char *dest,
 
 	/*
 	 * Initialize the history lists to empty.  We do not need to zero the
-	 * hist_entries[] array; its entries are initialized as they are used.
+	 * hist_prev[] array; its entries are initialized as they are used.
 	 */
-	memset(hist_start, 0, hashsz * sizeof(int16));
+	memset(hist_head, 0, hashsz * sizeof(uint32));
 
 	/*
 	 * Compress the source directly into the output buffer.
@@ -630,8 +603,8 @@ pglz_compress(const char *source, int32 slen, char *dest,
 		/*
 		 * Try to find a match in the history
 		 */
-		if (pglz_find_match(hist_start, dp, dend, &match_len,
-							&match_off, good_match, good_drop, mask))
+		if (pglz_find_match(dp, dend, &match_len,
+							&match_off, good_match, good_drop, mask, pos))
 		{
 			/*
 			 * Create the tag and add history entries for all matched
@@ -640,11 +613,9 @@ pglz_compress(const char *source, int32 slen, char *dest,
 			pglz_out_tag(ctrlp, ctrlb, ctrl, bp, match_len, match_off);
 			while (match_len--)
 			{
-				pglz_hist_add(hist_start, hist_entries,
-							  hist_next, hist_recycle,
-							  dp, dend, mask);
-				dp++;			/* Do not do this ++ in the line above! */
-				/* The macro would do it four times - Jan.  */
+				pglz_hist_add(dp, dend, pos, mask);
+				pos++;
+				dp++;
 			}
 			found_match = true;
 		}
@@ -654,11 +625,9 @@ pglz_compress(const char *source, int32 slen, char *dest,
 			 * No match found. Copy one literal byte.
 			 */
 			pglz_out_literal(ctrlp, ctrlb, ctrl, bp, *dp);
-			pglz_hist_add(hist_start, hist_entries,
-						  hist_next, hist_recycle,
-						  dp, dend, mask);
-			dp++;				/* Do not do this ++ in the line above! */
-			/* The macro would do it four times - Jan.  */
+			pglz_hist_add(dp, dend, pos, mask);
+			pos++;
+			dp++;
 		}
 	}
 
