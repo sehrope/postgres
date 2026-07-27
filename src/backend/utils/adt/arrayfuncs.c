@@ -27,6 +27,7 @@
 #include "optimizer/optimizer.h"
 #include "parser/scansup.h"
 #include "port/pg_bitutils.h"
+#include "port/simd.h"
 #include "utils/array.h"
 #include "utils/arrayaccess.h"
 #include "utils/builtins.h"
@@ -103,7 +104,8 @@ static bool ReadArrayStr(char **srcptr,
 						 int *nitems_p,
 						 Datum **values_p, bool **nulls_p,
 						 const char *origStr, Node *escontext);
-static ArrayToken ReadArrayToken(char **srcptr, StringInfo elembuf, char typdelim,
+static ArrayToken ReadArrayToken(char **srcptr, const char **endp,
+								 StringInfo elembuf, char typdelim,
 								 const char *origStr, Node *escontext);
 static void ReadArrayBinary(StringInfo buf, int nitems,
 							FmgrInfo *receiveproc, Oid typioparam, int32 typmod,
@@ -598,6 +600,7 @@ ReadArrayStr(char **srcptr,
 {
 	int			ndim = *ndim_p;
 	bool		dimensions_specified = (ndim != 0);
+	const char *end = NULL;
 	int			maxitems;
 	Datum	   *values;
 	bool	   *nulls;
@@ -628,7 +631,7 @@ ReadArrayStr(char **srcptr,
 	{
 		ArrayToken	tok;
 
-		tok = ReadArrayToken(srcptr, &elembuf, typdelim, origStr, escontext);
+		tok = ReadArrayToken(srcptr, &end, &elembuf, typdelim, origStr, escontext);
 
 		switch (tok)
 		{
@@ -797,10 +800,12 @@ dimension_error:
  * If the token is ATOK_ELEM, the de-escaped string is returned in elembuf.
  */
 static ArrayToken
-ReadArrayToken(char **srcptr, StringInfo elembuf, char typdelim,
+ReadArrayToken(char **srcptr, const char **endp,
+			   StringInfo elembuf, char typdelim,
 			   const char *origStr, Node *escontext)
 {
 	char	   *p = *srcptr;
+	const char *end;
 	int			dstlen;
 	bool		has_escapes;
 
@@ -838,8 +843,36 @@ ReadArrayToken(char **srcptr, StringInfo elembuf, char typdelim,
 	}
 
 quoted_element:
+
+	/* Locate the string's end once; unquoted elements never need it. */
+	if (*endp == NULL)
+		*endp = p + strlen(p);
+	end = *endp;
+
 	for (;;)
 	{
+		const char *start = p;
+
+		/*
+		 * Copy bytes needing no special handling in bulk.  Within a quoted
+		 * element only '"' and '\\' are special, and the terminating NUL can
+		 * only appear at "end".
+		 */
+		while (p < end - sizeof(Vector8))
+		{
+			Vector8		chunk;
+
+			vector8_load(&chunk, (const uint8 *) p);
+			if (vector8_has(chunk, (unsigned char) '"') ||
+				vector8_has(chunk, (unsigned char) '\\'))
+				break;
+			p += sizeof(Vector8);
+		}
+		while (*p != '\0' && *p != '"' && *p != '\\')
+			p++;
+		if (p > start)
+			appendBinaryStringInfo(elembuf, start, p - start);
+
 		switch (*p)
 		{
 			case '\0':
