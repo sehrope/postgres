@@ -33,6 +33,7 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "port/simd.h"
 #include "storage/fd.h"
 #include "tcop/tcopprot.h"
 #include "utils/json.h"
@@ -1528,60 +1529,83 @@ CopyAttributeOutText(CopyToState cstate, const char *string)
 	}
 	else
 	{
+		const char *end = ptr + strlen(ptr);
+
 		start = ptr;
-		while ((c = *ptr) != '\0')
+		while (ptr < end)
 		{
-			if ((unsigned char) c < (unsigned char) 0x20)
+			const char *chunk_end;
+
+			/* Skip bytes needing no escaping in bulk. */
+			while (ptr < end - sizeof(Vector8))
 			{
-				/*
-				 * \r and \n must be escaped, the others are traditional. We
-				 * prefer to dump these using the C-like notation, rather than
-				 * a backslash and the literal character, because it makes the
-				 * dump file a bit more proof against Microsoftish data
-				 * mangling.
-				 */
-				switch (c)
+				Vector8		chunk;
+
+				vector8_load(&chunk, (const uint8 *) ptr);
+				if (vector8_has_le(chunk, (unsigned char) 0x1F) ||
+					vector8_has(chunk, (unsigned char) '\\') ||
+					vector8_has(chunk, (unsigned char) delimc))
+					break;
+				ptr += sizeof(Vector8);
+			}
+
+			/* Then examine the next chunk (or the tail) per byte. */
+			chunk_end = Min(ptr + sizeof(Vector8), end);
+			while (ptr < chunk_end)
+			{
+				c = *ptr;
+				if ((unsigned char) c < (unsigned char) 0x20)
 				{
-					case '\b':
-						c = 'b';
-						break;
-					case '\f':
-						c = 'f';
-						break;
-					case '\n':
-						c = 'n';
-						break;
-					case '\r':
-						c = 'r';
-						break;
-					case '\t':
-						c = 't';
-						break;
-					case '\v':
-						c = 'v';
-						break;
-					default:
-						/* If it's the delimiter, must backslash it */
-						if (c == delimc)
+					/*
+					 * \r and \n must be escaped, the others are traditional.
+					 * We prefer to dump these using the C-like notation,
+					 * rather than a backslash and the literal character,
+					 * because it makes the dump file a bit more proof against
+					 * Microsoftish data mangling.
+					 */
+					switch (c)
+					{
+						case '\b':
+							c = 'b';
 							break;
-						/* All ASCII control chars are length 1 */
-						ptr++;
-						continue;	/* fall to end of loop */
+						case '\f':
+							c = 'f';
+							break;
+						case '\n':
+							c = 'n';
+							break;
+						case '\r':
+							c = 'r';
+							break;
+						case '\t':
+							c = 't';
+							break;
+						case '\v':
+							c = 'v';
+							break;
+						default:
+							/* If it's the delimiter, must backslash it */
+							if (c == delimc)
+								break;
+							/* All ASCII control chars are length 1 */
+							ptr++;
+							continue;	/* fall to end of loop */
+					}
+					/* if we get here, we need to convert the control char */
+					DUMPSOFAR();
+					CopySendChar(cstate, '\\');
+					CopySendChar(cstate, c);
+					start = ++ptr;	/* do not include char in next run */
 				}
-				/* if we get here, we need to convert the control char */
-				DUMPSOFAR();
-				CopySendChar(cstate, '\\');
-				CopySendChar(cstate, c);
-				start = ++ptr;	/* do not include char in next run */
+				else if (c == '\\' || c == delimc)
+				{
+					DUMPSOFAR();
+					CopySendChar(cstate, '\\');
+					start = ptr++;	/* we include char in next run */
+				}
+				else
+					ptr++;
 			}
-			else if (c == '\\' || c == delimc)
-			{
-				DUMPSOFAR();
-				CopySendChar(cstate, '\\');
-				start = ptr++;	/* we include char in next run */
-			}
-			else
-				ptr++;
 		}
 	}
 
@@ -1631,6 +1655,28 @@ CopyAttributeOutCSV(CopyToState cstate, const char *string,
 		{
 			const char *tptr = ptr;
 
+			/*
+			 * In encodings where multibyte characters cannot contain ASCII
+			 * bytes, skip chunks without special characters in bulk.
+			 */
+			if (!cstate->encoding_embeds_ascii)
+			{
+				const char *tend = ptr + strlen(ptr);
+
+				while (tptr < tend - sizeof(Vector8))
+				{
+					Vector8		chunk;
+
+					vector8_load(&chunk, (const uint8 *) tptr);
+					if (vector8_has(chunk, (unsigned char) delimc) ||
+						vector8_has(chunk, (unsigned char) quotec) ||
+						vector8_has(chunk, (unsigned char) '\n') ||
+						vector8_has(chunk, (unsigned char) '\r'))
+						break;
+					tptr += sizeof(Vector8);
+				}
+			}
+
 			while ((c = *tptr) != '\0')
 			{
 				if (c == delimc || c == quotec || c == '\n' || c == '\r')
@@ -1654,18 +1700,56 @@ CopyAttributeOutCSV(CopyToState cstate, const char *string,
 		 * We adopt the same optimization strategy as in CopyAttributeOutText
 		 */
 		start = ptr;
-		while ((c = *ptr) != '\0')
+		if (!cstate->encoding_embeds_ascii)
 		{
-			if (c == quotec || c == escapec)
+			const char *end = ptr + strlen(ptr);
+
+			while (ptr < end)
 			{
-				DUMPSOFAR();
-				CopySendChar(cstate, escapec);
-				start = ptr;	/* we include char in next run */
+				const char *chunk_end;
+
+				/* Skip bytes needing no escaping in bulk. */
+				while (ptr < end - sizeof(Vector8))
+				{
+					Vector8		chunk;
+
+					vector8_load(&chunk, (const uint8 *) ptr);
+					if (vector8_has(chunk, (unsigned char) quotec) ||
+						vector8_has(chunk, (unsigned char) escapec))
+						break;
+					ptr += sizeof(Vector8);
+				}
+
+				/* Then examine the next chunk (or the tail) per byte. */
+				chunk_end = Min(ptr + sizeof(Vector8), end);
+				while (ptr < chunk_end)
+				{
+					c = *ptr;
+					if (c == quotec || c == escapec)
+					{
+						DUMPSOFAR();
+						CopySendChar(cstate, escapec);
+						start = ptr;	/* we include char in next run */
+					}
+					ptr++;
+				}
 			}
-			if (IS_HIGHBIT_SET(c) && cstate->encoding_embeds_ascii)
-				ptr += pg_encoding_mblen(cstate->file_encoding, ptr);
-			else
-				ptr++;
+		}
+		else
+		{
+			while ((c = *ptr) != '\0')
+			{
+				if (c == quotec || c == escapec)
+				{
+					DUMPSOFAR();
+					CopySendChar(cstate, escapec);
+					start = ptr;	/* we include char in next run */
+				}
+				if (IS_HIGHBIT_SET(c))
+					ptr += pg_encoding_mblen(cstate->file_encoding, ptr);
+				else
+					ptr++;
+			}
 		}
 		DUMPSOFAR();
 
