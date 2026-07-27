@@ -22,6 +22,7 @@
 #include "funcapi.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
+#include "port/simd.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
@@ -85,6 +86,7 @@ record_in(PG_FUNCTION_ARGS)
 	int			ncolumns;
 	int			i;
 	char	   *ptr;
+	const char *end;
 	Datum	   *values;
 	bool	   *nulls;
 	StringInfoData buf;
@@ -148,6 +150,7 @@ record_in(PG_FUNCTION_ARGS)
 	 * each column, which is then fed to the appropriate input converter.
 	 */
 	ptr = string;
+	end = string + strlen(string);
 	/* Allow leading whitespace */
 	while (*ptr && isspace((unsigned char) *ptr))
 		ptr++;
@@ -207,7 +210,34 @@ record_in(PG_FUNCTION_ARGS)
 			resetStringInfo(&buf);
 			while (inquote || !(*ptr == ',' || *ptr == ')'))
 			{
-				char		ch = *ptr++;
+				char		ch;
+
+				/*
+				 * Within quotes, copy bytes needing no special handling ('"'
+				 * and '\\') in bulk; the terminating NUL can only appear at
+				 * "end".
+				 */
+				if (inquote)
+				{
+					const char *start = ptr;
+
+					while (ptr < end - sizeof(Vector8))
+					{
+						Vector8		chunk;
+
+						vector8_load(&chunk, (const uint8 *) ptr);
+						if (vector8_has(chunk, (unsigned char) '"') ||
+							vector8_has(chunk, (unsigned char) '\\'))
+							break;
+						ptr += sizeof(Vector8);
+					}
+					while (*ptr != '\0' && *ptr != '"' && *ptr != '\\')
+						ptr++;
+					if (ptr > start)
+						appendBinaryStringInfo(&buf, start, ptr - start);
+				}
+
+				ch = *ptr++;
 
 				if (ch == '\0')
 				{
