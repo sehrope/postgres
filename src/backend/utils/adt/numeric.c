@@ -618,6 +618,65 @@ static void accum_sum_combine(NumericSumAccum *accum, NumericSumAccum *accum2);
 
 
 /*
+ * Fast-path conversion of a plain integer that fits in int64, bypassing
+ * set_var_from_str() and its per-digit workspace.  Returns NULL if str is
+ * not of that form; the caller falls back to the full parser.  Leading
+ * zeros are fine (the value round-trips identically), but whitespace,
+ * decimal points, exponents and non-decimal bases are not.
+ */
+static Numeric
+numeric_in_int64(const char *str)
+{
+	const char *ptr = str;
+	bool		neg = false;
+	unsigned char digit;
+	uint64		tmp;
+	int64		val;
+
+	if (*ptr == '-')
+	{
+		ptr++;
+		neg = true;
+	}
+	else if (*ptr == '+')
+		ptr++;
+
+	digit = (*ptr - '0');
+	if (unlikely(digit >= 10))
+		return NULL;
+	ptr++;
+	tmp = digit;
+
+	for (;;)
+	{
+		digit = (*ptr - '0');
+		if (digit >= 10)
+			break;
+		ptr++;
+		if (unlikely(tmp > -(PG_INT64_MIN / 10)))
+			return NULL;
+		tmp = tmp * 10 + digit;
+	}
+
+	if (*ptr != '\0')
+		return NULL;
+
+	if (neg)
+	{
+		if (unlikely(pg_neg_u64_overflow(tmp, &val)))
+			return NULL;
+	}
+	else
+	{
+		if (unlikely(tmp > PG_INT64_MAX))
+			return NULL;
+		val = (int64) tmp;
+	}
+
+	return int64_to_numeric(val);
+}
+
+/*
  * numeric_in() -
  *
  *	Input function for numeric data type
@@ -635,6 +694,18 @@ numeric_in(PG_FUNCTION_ARGS)
 	const char *cp;
 	const char *numstart;
 	int			sign;
+
+	/*
+	 * Fast path for plain integers fitting in int64.  Not usable with a
+	 * typmod constraint (typmod >= VARHDRSZ), since apply_typmod() must run
+	 * then.
+	 */
+	if (typmod < (int32) VARHDRSZ)
+	{
+		res = numeric_in_int64(str);
+		if (res != NULL)
+			PG_RETURN_NUMERIC(res);
+	}
 
 	/* Skip leading spaces */
 	cp = str;
