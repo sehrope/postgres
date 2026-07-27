@@ -750,6 +750,12 @@ extern bool InputFunctionCallSafe(FmgrInfo *flinfo, char *str,
 								  Oid typioparam, int32 typmod,
 								  Node *escontext,
 								  Datum *result);
+extern FunctionCallInfo PrepareInputFunctionCallInfo(FmgrInfo *flinfo,
+													 Oid typioparam,
+													 int32 typmod);
+extern bool PreparedInputFunctionCallSafe(FunctionCallInfo fcinfo, char *str,
+										  Node *escontext,
+										  Datum *result);
 extern bool DirectInputFunctionCallSafe(PGFunction func, char *str,
 										Oid typioparam, int32 typmod,
 										Node *escontext,

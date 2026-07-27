@@ -605,6 +605,7 @@ ReadArrayStr(char **srcptr,
 	Datum	   *values;
 	bool	   *nulls;
 	StringInfoData elembuf;
+	FunctionCallInfo in_fcinfo;
 	int			nest_level;
 	int			nitems;
 	bool		ndim_frozen;
@@ -618,6 +619,9 @@ ReadArrayStr(char **srcptr,
 
 	/* Allocate workspace to hold (string representation of) one element */
 	initStringInfo(&elembuf);
+
+	/* Set up a reusable call description for the input function */
+	in_fcinfo = PrepareInputFunctionCallInfo(inputproc, typioparam, typmod);
 
 	/* Loop below assumes first token is ATOK_LEVEL_START */
 	Assert(**srcptr == '{');
@@ -739,11 +743,10 @@ ReadArrayStr(char **srcptr,
 				}
 
 				/* Read the element's value, or check that NULL is allowed */
-				if (!InputFunctionCallSafe(inputproc,
-										   (tok == ATOK_ELEM_NULL) ? NULL : elembuf.data,
-										   typioparam, typmod,
-										   escontext,
-										   &values[nitems]))
+				if (!PreparedInputFunctionCallSafe(in_fcinfo,
+												   (tok == ATOK_ELEM_NULL) ? NULL : elembuf.data,
+												   escontext,
+												   &values[nitems]))
 					return false;
 				nulls[nitems] = (tok == ATOK_ELEM_NULL);
 				nitems++;
@@ -958,7 +961,7 @@ unquoted_element:
 					elembuf->len = dstlen;
 					*srcptr = p;
 					/* Check if it's unquoted "NULL" */
-					if (Array_nulls && !has_escapes &&
+					if (Array_nulls && !has_escapes && dstlen == 4 &&
 						pg_strcasecmp(elembuf->data, "NULL") == 0)
 						return ATOK_ELEM_NULL;
 					else

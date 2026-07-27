@@ -1629,6 +1629,72 @@ InputFunctionCallSafe(FmgrInfo *flinfo, char *str,
 }
 
 /*
+ * Prepare a reusable FunctionCallInfo for repeated calls to the same input
+ * function with the same typioparam and typmod, as when converting many
+ * array or record elements.  Use with PreparedInputFunctionCallSafe().
+ */
+FunctionCallInfo
+PrepareInputFunctionCallInfo(FmgrInfo *flinfo, Oid typioparam, int32 typmod)
+{
+	FunctionCallInfo fcinfo;
+
+	fcinfo = (FunctionCallInfo) palloc(SizeForFunctionCallInfo(3));
+	InitFunctionCallInfoData(*fcinfo, flinfo, 3, InvalidOid, NULL, NULL);
+
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = ObjectIdGetDatum(typioparam);
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = Int32GetDatum(typmod);
+	fcinfo->args[2].isnull = false;
+
+	return fcinfo;
+}
+
+/*
+ * Like InputFunctionCallSafe, but using a FunctionCallInfo prepared with
+ * PrepareInputFunctionCallInfo, skipping its per-call setup.
+ */
+bool
+PreparedInputFunctionCallSafe(FunctionCallInfo fcinfo, char *str,
+							  Node *escontext,
+							  Datum *result)
+{
+	FmgrInfo   *flinfo = fcinfo->flinfo;
+
+	if (str == NULL && flinfo->fn_strict)
+	{
+		*result = (Datum) 0;	/* just return null result */
+		return true;
+	}
+
+	fcinfo->args[0].value = CStringGetDatum(str);
+	fcinfo->context = escontext;
+	fcinfo->isnull = false;
+
+	*result = FunctionCallInvoke(fcinfo);
+
+	/* Result value is garbage, and could be null, if an error was reported */
+	if (SOFT_ERROR_OCCURRED(escontext))
+		return false;
+
+	/* Otherwise, should get null result if and only if str is NULL */
+	if (str == NULL)
+	{
+		if (!fcinfo->isnull)
+			elog(ERROR, "input function %u returned non-NULL",
+				 flinfo->fn_oid);
+	}
+	else
+	{
+		if (fcinfo->isnull)
+			elog(ERROR, "input function %u returned NULL",
+				 flinfo->fn_oid);
+	}
+
+	return true;
+}
+
+/*
  * Call a directly-named datatype input function, with non-exception
  * handling of "soft" errors.
  *
