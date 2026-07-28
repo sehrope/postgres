@@ -75,10 +75,40 @@ SELECT '0.1'::jsonb;				-- OK
  0.1
 (1 row)
 
+SELECT '9223372036854775807'::jsonb;	-- OK, INT64_MAX takes the int64 fast path
+        jsonb        
+---------------------
+ 9223372036854775807
+(1 row)
+
+SELECT '-9223372036854775808'::jsonb;	-- OK, INT64_MIN takes the int64 fast path
+        jsonb         
+----------------------
+ -9223372036854775808
+(1 row)
+
 SELECT '9223372036854775808'::jsonb;	-- OK, even though it's too large for int8
         jsonb        
 ---------------------
  9223372036854775808
+(1 row)
+
+SELECT '-9223372036854775809'::jsonb;	-- OK, too small for int8
+        jsonb         
+----------------------
+ -9223372036854775809
+(1 row)
+
+SELECT '-0'::jsonb;				-- OK, normalized to 0
+ jsonb 
+-------
+ 0
+(1 row)
+
+SELECT '123456789012345678901234567890'::jsonb;	-- OK, way beyond int8
+             jsonb              
+--------------------------------
+ 123456789012345678901234567890
 (1 row)
 
 SELECT '1e100'::jsonb;			-- OK

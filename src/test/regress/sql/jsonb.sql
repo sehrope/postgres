@@ -24,7 +24,12 @@ SELECT '1'::jsonb;				-- OK
 SELECT '0'::jsonb;				-- OK
 SELECT '01'::jsonb;				-- ERROR, not valid according to JSON spec
 SELECT '0.1'::jsonb;				-- OK
+SELECT '9223372036854775807'::jsonb;	-- OK, INT64_MAX takes the int64 fast path
+SELECT '-9223372036854775808'::jsonb;	-- OK, INT64_MIN takes the int64 fast path
 SELECT '9223372036854775808'::jsonb;	-- OK, even though it's too large for int8
+SELECT '-9223372036854775809'::jsonb;	-- OK, too small for int8
+SELECT '-0'::jsonb;				-- OK, normalized to 0
+SELECT '123456789012345678901234567890'::jsonb;	-- OK, way beyond int8
 SELECT '1e100'::jsonb;			-- OK
 SELECT '1.3e100'::jsonb;			-- OK
 SELECT '1f2'::jsonb;				-- ERROR
