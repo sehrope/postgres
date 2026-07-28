@@ -19,7 +19,7 @@
 
 #include "common/jsonapi.h"
 #include "mb/pg_wchar.h"
-#include "port/pg_lfind.h"
+#include "port/simd.h"
 
 #ifdef JSONAPI_USE_PQEXPBUFFER
 #include "pqexpbuffer.h"
@@ -2213,13 +2213,22 @@ json_lex_string(JsonLexContext *lex)
 
 			/*
 			 * Skip to the first byte that requires special handling, so we
-			 * can batch calls to jsonapi_appendBinaryStringInfo.
+			 * can batch calls to jsonapi_appendBinaryStringInfo.  Load
+			 * sizeof(Vector8) bytes at a time and stop on the first chunk
+			 * containing a quote, a backslash or a control byte; the per-byte
+			 * loop below sorts out which byte it was.
 			 */
-			while (p < end - sizeof(Vector8) &&
-				   !pg_lfind8('\\', (const uint8 *) p, sizeof(Vector8)) &&
-				   !pg_lfind8('"', (const uint8 *) p, sizeof(Vector8)) &&
-				   !pg_lfind8_le(31, (const uint8 *) p, sizeof(Vector8)))
+			while (p < end - sizeof(Vector8))
+			{
+				Vector8		chunk;
+
+				vector8_load(&chunk, (const uint8 *) p);
+				if (vector8_has_le(chunk, (unsigned char) 0x1F) ||
+					vector8_has(chunk, (unsigned char) '"') ||
+					vector8_has(chunk, (unsigned char) '\\'))
+					break;
 				p += sizeof(Vector8);
+			}
 
 			for (; p < end; p++)
 			{
