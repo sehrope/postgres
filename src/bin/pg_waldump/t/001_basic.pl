@@ -185,6 +185,13 @@ CREATE TABLESPACE ts1 LOCATION '$tblspc_path';
 DROP TABLESPACE ts1;
 });
 
+# End of the deliberately generated records that the option and filter
+# tests below look at.  The WAL emitted after this point only fills up
+# the segment to set up the continuation record case, so those tests
+# stop here rather than decode all of it every time.
+my $test_end_lsn =
+  $node->safe_psql('postgres', 'SELECT pg_current_wal_insert_lsn()');
+
 # Test: Decode a continuation record (contrecord) that spans multiple WAL
 # segments.
 #
@@ -243,8 +250,14 @@ command_fails_like(
 	[ 'pg_waldump', 'foo', 'bar' ],
 	qr/error: could not locate WAL file "foo"/,
 	'start file not found');
-command_like([ 'pg_waldump', $node->data_dir . '/pg_wal/' . $start_walfile ],
-	qr/./, 'runs with start segment specified');
+command_like(
+	[
+		'pg_waldump',
+		'--limit' => 1,
+		$node->data_dir . '/pg_wal/' . $start_walfile
+	],
+	qr/./,
+	'runs with start segment specified');
 command_fails_like(
 	[ 'pg_waldump', $node->data_dir . '/pg_wal/' . $start_walfile, 'bar' ],
 	qr/error: could not open file "bar"/,
@@ -252,6 +265,7 @@ command_fails_like(
 command_like(
 	[
 		'pg_waldump',
+		'--limit' => 1,
 		$node->data_dir . '/pg_wal/' . $start_walfile,
 		$node->data_dir . '/pg_wal/' . $end_walfile
 	],
@@ -260,6 +274,7 @@ command_like(
 command_like(
 	[
 		'pg_waldump', '--quiet',
+		'--limit' => 1,
 		'--path', $node->data_dir . '/pg_wal/',
 		$start_walfile
 	],
@@ -313,6 +328,7 @@ sub test_pg_waldump_skip_bytes
 		'--start' => $new_start,
 		'--end' => $endlsn,
 		'--path' => $path,
+		'--limit' => 1,
 	  ],
 	  '>' => \$stdout,
 	  '2>' => \$stderr;
@@ -370,6 +386,14 @@ sub generate_archive
 	chdir($cwd) || die "chdir: $!";
 }
 
+# Decode the full WAL range and check the output format once.  Rendering
+# does not depend on how the input is read, so there is no need to
+# repeat this multi-megabyte dump for every scenario below.
+{
+	my @lines = test_pg_waldump($node->data_dir, $start_lsn, $end_lsn);
+	is(grep(!/^rmgr: \w/, @lines), 0, 'all output lines are rmgr lines');
+}
+
 my $tmp_dir = PostgreSQL::Test::Utils::tempdir_short();
 
 my @scenarios = (
@@ -399,11 +423,11 @@ for my $scenario (@scenarios)
 
   SKIP:
 	{
-		skip "tar command is not available", 56
+		skip "tar command is not available", 53
 		  if (!defined $tar || $tar eq '') && $scenario->{'is_archive'};
 		skip
 		  "$scenario->{'compression_method'} compression not supported by this build",
-		  56
+		  53
 		  if !$scenario->{'enabled'} && $scenario->{'is_archive'};
 
 		# create pg_wal archive
@@ -425,14 +449,33 @@ for my $scenario (@scenarios)
 				'--path' => $path,
 				'--start' => $start_lsn,
 				'--end' => $end_lsn,
+				'--limit' => 1,
 			],
 			qr/./,
 			'runs with path option and start and end locations');
+
+		# The whole generated WAL range parses without error.  --quiet
+		# keeps the sizable record dump off stdout; every record is
+		# still decoded.
+		command_ok(
+			[
+				'pg_waldump', '--quiet',
+				'--path' => $path,
+				'--start' => $start_lsn,
+				'--end' => $end_lsn,
+			],
+			'full WAL range parses successfully');
+
+		test_pg_waldump_skip_bytes($path, $start_lsn, $end_lsn);
+
+		# The following tests only need the records near the end of the
+		# generated WAL.  Starting at contrecord_lsn instead of start_lsn
+		# avoids decoding the large segment-filling workload every time.
 		command_fails_like(
 			[
 				'pg_waldump',
 				'--path' => $path,
-				'--start' => $start_lsn,
+				'--start' => $contrecord_lsn,
 			],
 			qr/error: error in WAL record at/,
 			'falling off the end of the WAL results in an error');
@@ -441,17 +484,12 @@ for my $scenario (@scenarios)
 			[
 				'pg_waldump', '--quiet',
 				'--path' => $path,
-				'--start' => $start_lsn
+				'--start' => $contrecord_lsn
 			],
 			qr/error: error in WAL record at/,
 			'errors are shown with --quiet');
 
-		test_pg_waldump_skip_bytes($path, $start_lsn, $end_lsn);
-
-		my @lines = test_pg_waldump($path, $start_lsn, $end_lsn);
-		is(grep(!/^rmgr: \w/, @lines), 0, 'all output lines are rmgr lines');
-
-		@lines = test_pg_waldump($path, $contrecord_lsn, $end_lsn);
+		my @lines = test_pg_waldump($path, $contrecord_lsn, $end_lsn);
 		is(grep(!/^rmgr: \w/, @lines), 0, 'all output lines are rmgr lines');
 
 		test_pg_waldump_skip_bytes($path, $contrecord_lsn, $end_lsn);
@@ -459,27 +497,31 @@ for my $scenario (@scenarios)
 		@lines = test_pg_waldump($path, $start_lsn, $end_lsn, '--limit' => 6);
 		is(@lines, 6, 'limit option observed');
 
-		@lines = test_pg_waldump($path, $start_lsn, $end_lsn, '--fullpage');
+		# The filter tests run over all of the deliberately generated
+		# records, stopping at test_end_lsn before the segment-filling
+		# workload, which has nothing more to offer them.
+		@lines = test_pg_waldump($path, $start_lsn, $test_end_lsn,
+			'--fullpage');
 		is(grep(!/^rmgr:.*\bFPW\b/, @lines), 0, 'all output lines are FPW');
 
-		@lines = test_pg_waldump($path, $start_lsn, $end_lsn, '--stats');
+		@lines = test_pg_waldump($path, $start_lsn, $test_end_lsn, '--stats');
 		like($lines[0], qr/WAL statistics/, "statistics on stdout");
 		is(grep(/^rmgr:/, @lines), 0, 'no rmgr lines output');
 
-		@lines =
-		  test_pg_waldump($path, $start_lsn, $end_lsn, '--stats=record');
+		@lines = test_pg_waldump($path, $start_lsn, $test_end_lsn,
+			'--stats=record');
 		like($lines[0], qr/WAL statistics/, "statistics on stdout");
 		is(grep(/^rmgr:/, @lines), 0, 'no rmgr lines output');
 
-		@lines =
-		  test_pg_waldump($path, $start_lsn, $end_lsn, '--rmgr' => 'Btree');
+		@lines = test_pg_waldump($path, $start_lsn, $test_end_lsn,
+			'--rmgr' => 'Btree');
 		is(grep(!/^rmgr: Btree/, @lines), 0, 'only Btree lines');
 
-		@lines =
-		  test_pg_waldump($path, $start_lsn, $end_lsn, '--fork' => 'init');
+		@lines = test_pg_waldump($path, $start_lsn, $test_end_lsn,
+			'--fork' => 'init');
 		is(grep(!/fork init/, @lines), 0, 'only init fork lines');
 
-		@lines = test_pg_waldump($path, $start_lsn, $end_lsn,
+		@lines = test_pg_waldump($path, $start_lsn, $test_end_lsn,
 			'--relation' => "$default_ts_oid/$postgres_db_oid/$rel_t1_oid");
 		is( grep(!/rel $default_ts_oid\/$postgres_db_oid\/$rel_t1_oid/,
 				@lines),
@@ -487,7 +529,7 @@ for my $scenario (@scenarios)
 			'only lines for selected relation');
 
 		@lines = test_pg_waldump(
-			$path, $start_lsn, $end_lsn,
+			$path, $start_lsn, $test_end_lsn,
 			'--relation' => "$default_ts_oid/$postgres_db_oid/$rel_i1a_oid",
 			'--block' => 1);
 		is(grep(!/\bblk 1\b/, @lines), 0, 'only lines for selected block');
