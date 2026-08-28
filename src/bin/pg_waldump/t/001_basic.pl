@@ -5,6 +5,7 @@ use strict;
 use warnings FATAL => 'all';
 use Cwd;
 use File::Copy;
+use File::Temp;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
@@ -243,19 +244,31 @@ command_fails_like(
 	[ 'pg_waldump', 'foo', 'bar' ],
 	qr/error: could not locate WAL file "foo"/,
 	'start file not found');
-command_like([ 'pg_waldump', $node->data_dir . '/pg_wal/' . $start_walfile ],
-	qr/./, 'runs with start segment specified');
+# This checks that a positional STARTSEG is accepted; --limit bounds the
+# output, which is otherwise a whole segment.  That the implicit end location
+# (the end of STARTSEG) is honored is covered by the --quiet test below, which
+# reads the same segment to completion.
+command_like(
+	[
+		'pg_waldump', '--limit' => 1,
+		$node->data_dir . '/pg_wal/' . $start_walfile
+	],
+	qr/^rmgr: /,
+	'runs with start segment specified');
 command_fails_like(
 	[ 'pg_waldump', $node->data_dir . '/pg_wal/' . $start_walfile, 'bar' ],
 	qr/error: could not open file "bar"/,
 	'end file not found');
+# --stats keeps the whole range decoded, so an end location derived wrongly
+# from ENDSEG still shows up as a non-zero exit status, without dumping every
+# record to the test harness.
 command_like(
 	[
-		'pg_waldump',
+		'pg_waldump', '--stats',
 		$node->data_dir . '/pg_wal/' . $start_walfile,
 		$node->data_dir . '/pg_wal/' . $end_walfile
 	],
-	qr/./,
+	qr/^WAL statistics between /,
 	'runs with start and end segment specified');
 command_like(
 	[
@@ -308,8 +321,9 @@ sub test_pg_waldump_skip_bytes
 
 	my ($stdout, $stderr);
 
+	# Only stderr is examined here, so suppress the dump entirely.
 	my $result = IPC::Run::run [
-		'pg_waldump',
+		'pg_waldump', '--quiet',
 		'--start' => $new_start,
 		'--end' => $endlsn,
 		'--path' => $path,
@@ -328,7 +342,13 @@ sub test_pg_waldump
 	local $Test::Builder::Level = $Test::Builder::Level + 1;
 	my ($path, $startlsn, $endlsn, @opts) = @_;
 
-	my ($stdout, $stderr);
+	my $stderr;
+
+	# An unfiltered dump of this range is many megabytes.  Send it to a file
+	# rather than capturing it into a Perl scalar: on Windows IPC::Run moves
+	# piped output through a helper process, which is orders of magnitude
+	# slower than writing and re-reading a file.
+	my $stdoutfile = File::Temp->new();
 
 	my $result = IPC::Run::run [
 		'pg_waldump',
@@ -337,11 +357,11 @@ sub test_pg_waldump
 		'--path' => $path,
 		@opts
 	  ],
-	  '>' => \$stdout,
+	  '>' => $stdoutfile,
 	  '2>' => \$stderr;
 	ok($result, "pg_waldump @opts: runs ok");
 	is($stderr, '', "pg_waldump @opts: no stderr");
-	my @lines = split /\n/, $stdout;
+	my @lines = split /\n/, slurp_file($stdoutfile);
 	ok(@lines > 0, "pg_waldump @opts: some lines are output");
 	return @lines;
 }
@@ -425,14 +445,17 @@ for my $scenario (@scenarios)
 				'--path' => $path,
 				'--start' => $start_lsn,
 				'--end' => $end_lsn,
+				'--limit' => 1,
 			],
-			qr/./,
+			qr/^rmgr: /,
 			'runs with path option and start and end locations');
+		# No --end, so this must run to the end of WAL and fail there.  Start
+		# near the end of WAL so that the discarded stdout stays small.
 		command_fails_like(
 			[
 				'pg_waldump',
 				'--path' => $path,
-				'--start' => $start_lsn,
+				'--start' => $contrecord_lsn,
 			],
 			qr/error: error in WAL record at/,
 			'falling off the end of the WAL results in an error');
