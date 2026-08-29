@@ -75,6 +75,12 @@ args: -ab
 --
 stderr: requires an argument -- '?b'?
 
+== short missing arg, non-option before
+args: foo -b
+?
+-- foo
+stderr: requires an argument -- '?b'?
+
 == short unknown
 args: -x
 ?
@@ -182,6 +188,12 @@ args: -a --beta
 -a
 ?
 --
+stderr: requires an argument -- beta|[`']--beta' requires an argument
+
+== long required, missing, non-option before
+args: foo --beta
+?
+-- foo
 stderr: requires an argument -- beta|[`']--beta' requires an argument
 
 == long optional, alone
