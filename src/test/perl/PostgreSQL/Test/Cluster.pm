@@ -3988,15 +3988,17 @@ sub advance_wal
 
 	# Advance by $n segments (= (wal_segment_size * $num) bytes).
 	# pg_switch_wal() forces a WAL flush, making pg_logical_emit_message()
-	# safe to use in non-transactional mode.
+	# safe to use in non-transactional mode.  All the segments are switched
+	# in one psql session to save process spawns.
+	my $sql = '';
 	for (my $i = 0; $i < $num; $i++)
 	{
-		$self->safe_psql(
-			'postgres', qq{
+		$sql .= qq{
 			SELECT pg_logical_emit_message(false, '', 'foo');
 			SELECT pg_switch_wal();
-			});
+			};
 	}
+	$self->safe_psql('postgres', $sql) if $sql ne '';
 }
 
 =item $node->checksum_enable_offline()
