@@ -235,13 +235,16 @@ sub detects_no_corruption
 #
 # The relname *must* be an uncorrupted table, or this will fail.
 #
-# The prefix is used to identify the test, along with the options,
-# and should be unique.
+# The prefix is used to identify the test and should be unique.  All of the
+# option combinations run in one psql session, and each query labels its
+# output with the options it used so that any corruption report can be
+# attributed.
 sub check_all_options_uncorrupted
 {
 	local $Test::Builder::Level = $Test::Builder::Level + 1;
 
 	my ($relname, $prefix) = @_;
+	my $sql = '';
 
 	for my $stop (qw(true false))
 	{
@@ -260,14 +263,17 @@ sub check_all_options_uncorrupted
 						  . "startblock := $startblock, "
 						  . "endblock := $endblock";
 
-						detects_no_corruption(
-							"verify_heapam('$relname', $opts)",
-							"$prefix: $opts");
+						(my $label = $opts) =~ s/'/''/g;
+						$sql .= "SELECT '$label' AS options, * "
+						  . "FROM verify_heapam('$relname', $opts);\n";
 					}
 				}
 			}
 		}
 	}
+
+	my $result = $node->safe_psql('postgres', $sql);
+	is($result, '', "$prefix: all options");
 }
 
 done_testing();
