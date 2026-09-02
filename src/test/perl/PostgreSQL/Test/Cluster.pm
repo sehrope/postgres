@@ -3405,17 +3405,12 @@ sub wait_for_catchup
 	}
 	if (!defined($target_lsn))
 	{
-		my $isrecovery =
-		  $self->safe_psql('postgres', "SELECT pg_is_in_recovery()");
-		chomp($isrecovery);
-		if ($isrecovery eq 't')
-		{
-			$target_lsn = $self->lsn('replay');
-		}
-		else
-		{
-			$target_lsn = $self->lsn('write');
-		}
+		# Use the replay LSN if this node is itself a standby, otherwise the
+		# write LSN.  One query does both to save a process spawn.
+		$target_lsn = $self->safe_psql('postgres',
+			"SELECT CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_lsn() END"
+		);
+		chomp($target_lsn);
 	}
 	print "Waiting for replication conn "
 	  . $standby_name . "'s "
