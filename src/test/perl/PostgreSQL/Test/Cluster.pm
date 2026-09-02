@@ -3212,6 +3212,20 @@ sub _get_insert_lsn
 			'postgres', "SELECT pg_current_wal_insert_lsn() - '0/0'"));
 }
 
+# Private routine emitting a WAL record of the given size and returning the
+# insert LSN reached afterwards, in bytes.  The record is emitted in the
+# FROM clause so that it is written before the LSN is read, and both
+# happen in one psql session to save a process spawn in the loops below.
+sub _emit_wal_get_insert_lsn
+{
+	my ($self, $size) = @_;
+	return int(
+		$self->safe_psql(
+			'postgres',
+			"SELECT pg_current_wal_insert_lsn() - '0/0'
+			 FROM pg_logical_emit_message(true, '', repeat('a', $size))"));
+}
+
 =pod
 
 =item $node->advance_wal_out_of_record_splitting_zone($wal_block_size)
@@ -3235,8 +3249,7 @@ sub advance_wal_out_of_record_splitting_zone
 	my $page_offset = $end_lsn % $wal_block_size;
 	while ($page_offset >= $wal_block_size - $page_threshold)
 	{
-		$self->emit_wal($page_threshold);
-		$end_lsn = $self->_get_insert_lsn();
+		$end_lsn = $self->_emit_wal_get_insert_lsn($page_threshold);
 		$page_offset = $end_lsn % $wal_block_size;
 	}
 	return $end_lsn;
@@ -3266,8 +3279,8 @@ sub advance_wal_to_record_splitting_zone
 	# Get fairly close to the end of a page in big steps
 	while ($page_offset <= $wal_block_size - 512)
 	{
-		$self->emit_wal($wal_block_size - $page_offset - 256);
-		$end_lsn = $self->_get_insert_lsn();
+		$end_lsn = $self->_emit_wal_get_insert_lsn(
+			$wal_block_size - $page_offset - 256);
 		$page_offset = $end_lsn % $wal_block_size;
 	}
 
@@ -3276,8 +3289,7 @@ sub advance_wal_to_record_splitting_zone
 	my $message_size = $wal_block_size - 80;
 	while ($page_offset <= $wal_block_size - $RECORD_HEADER_SIZE)
 	{
-		$self->emit_wal($message_size);
-		$end_lsn = $self->_get_insert_lsn();
+		$end_lsn = $self->_emit_wal_get_insert_lsn($message_size);
 
 		my $old_offset = $page_offset;
 		$page_offset = $end_lsn % $wal_block_size;
