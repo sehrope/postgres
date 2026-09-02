@@ -28,12 +28,23 @@ foreach my $exe (@exes)
 	like($stderr, qr/Usage:/, 'error message if not enough arguments');
 
 	# Test that we get success for small chunk sizes from 64 down to 1.
+	# The -r mode runs all of them in one process, with the output of each
+	# run followed by a null byte.
+	($stdout, $stderr) = run_command([ @$exe, "-r", 64, $test_file ]);
+
+	my @stdout = unpack("(Z*)*", $stdout);
+	my @stderr = unpack("(Z*)*", $stderr);
+
+	is(scalar @stdout, 64, "stdout has correct number of entries");
+	is(scalar @stderr, 64, "stderr has correct number of entries");
+
+	my $i = 0;
+
 	for (my $size = 64; $size > 0; $size--)
 	{
-		($stdout, $stderr) = run_command([ @$exe, "-c", $size, $test_file ]);
-
-		like($stdout, qr/SUCCESS/, "chunk size $size: test succeeds");
-		is($stderr, "", "chunk size $size: no error output");
+		like($stdout[$i], qr/SUCCESS/, "chunk size $size: test succeeds");
+		is($stderr[$i], "", "chunk size $size: no error output");
+		$i++;
 	}
 }
 
