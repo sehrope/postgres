@@ -21,16 +21,23 @@ sub test_index_replay
 	# Wait for standby to catch up
 	$node_primary->wait_for_catchup($node_standby);
 
+	# Each query matches thousands of rows, so compare a digest of the
+	# matched rows rather than the rows themselves.
 	my $queries = qq(SET enable_seqscan=off;
 SET enable_bitmapscan=on;
 SET enable_indexscan=on;
-SELECT * FROM tst WHERE i = 0;
-SELECT * FROM tst WHERE i = 3;
-SELECT * FROM tst WHERE t = 'b';
-SELECT * FROM tst WHERE t = 'f';
-SELECT * FROM tst WHERE i = 3 AND t = 'c';
-SELECT * FROM tst WHERE i = 7 AND t = 'e';
 );
+	foreach my $where (
+		"i = 0",
+		"i = 3",
+		"t = 'b'",
+		"t = 'f'",
+		"i = 3 AND t = 'c'",
+		"i = 7 AND t = 'e'")
+	{
+		$queries .= "SELECT count(*), md5(string_agg(tst::text, ','"
+		  . " ORDER BY tst::text)) FROM tst WHERE $where;\n";
+	}
 
 	# Run test queries and compare their result
 	my $primary_result = $node_primary->safe_psql("postgres", $queries);
