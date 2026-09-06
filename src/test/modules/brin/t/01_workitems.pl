@@ -51,10 +51,6 @@ $node->safe_psql('postgres',
 	"insert into journal select * from generate_series(timestamp '1976-08-01', '1976-10-28', '1 day')"
 );
 
-# Give a little time for autovacuum to react.  This matches the naptime
-# configured above.
-sleep(1);
-
 $node->poll_query_until(
 	'postgres',
 	"select count(*) > 1 from brin_page_items(get_raw_page('brin_wi_idx', 2), 'brin_wi_idx'::regclass)",
