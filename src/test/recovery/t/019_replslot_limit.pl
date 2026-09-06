@@ -382,20 +382,10 @@ $checkpoint->query_until(
 	CHECKPOINT;
 ));
 
-my $msg_logged = 0;
-my $max_attempts = $PostgreSQL::Test::Utils::timeout_default;
-while ($max_attempts-- >= 0)
-{
-	if ($node_primary3->log_contains(
-			"terminating process $senderpid to release replication slot \"rep3\"",
-			$logstart))
-	{
-		$msg_logged = 1;
-		last;
-	}
-	sleep 1;
-}
-ok($msg_logged, "walsender termination logged");
+ok( $node_primary3->wait_for_log(
+		qr/terminating process $senderpid to release replication slot "rep3"/,
+		$logstart),
+	"walsender termination logged");
 
 # Now let the walsender continue; slot should be killed now.
 # (Must not let walreceiver run yet; otherwise the standby could start another
@@ -407,19 +397,9 @@ $node_primary3->poll_query_until('postgres',
   or die "timed out waiting for slot to be lost";
 $checkpoint->quit;
 
-$msg_logged = 0;
-$max_attempts = $PostgreSQL::Test::Utils::timeout_default;
-while ($max_attempts-- >= 0)
-{
-	if ($node_primary3->log_contains(
-			'invalidating obsolete replication slot "rep3"', $logstart))
-	{
-		$msg_logged = 1;
-		last;
-	}
-	sleep 1;
-}
-ok($msg_logged, "slot invalidation logged");
+ok( $node_primary3->wait_for_log(
+		qr/invalidating obsolete replication slot "rep3"/, $logstart),
+	"slot invalidation logged");
 
 # Now let the walreceiver continue, so that the node can be stopped cleanly
 kill 'CONT', $receiverpid;
