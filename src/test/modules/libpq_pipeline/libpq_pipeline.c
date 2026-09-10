@@ -2847,6 +2847,19 @@ test_cursor_bind_validation(PGconn *conn)
 									PQ_BIND_CURSOR_SCROLL | PQ_BIND_CURSOR_NO_SCROLL) != 0)
 		pg_fatal("expected rejection of SCROLL | NO_SCROLL");
 
+	/* parameter count out of range */
+	if (PQsendBindWithCursorOptions(conn, "valstmt", -1, NULL, NULL, NULL, 0,
+									"p", 0) != 0)
+		pg_fatal("expected rejection of negative parameter count");
+
+	if (PQsendBindWithCursorOptions(conn, "valstmt", 65536, NULL, NULL, NULL, 0,
+									"p", 0) != 0)
+		pg_fatal("expected rejection of too many parameters");
+
+	if (PQsendBindAndExecutePortal(conn, "valstmt", 65536, NULL, NULL, NULL, 0,
+								   "p", 0, PQ_FETCH_FORWARD, 1) != 0)
+		pg_fatal("expected rejection of too many parameters");
+
 	if (PQexitPipelineMode(conn) != 1)
 		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
 

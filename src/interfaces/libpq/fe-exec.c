@@ -1968,6 +1968,13 @@ PQsendBindGuts(PGconn *conn,
 		return 0;
 	}
 
+	if (nParams < 0 || nParams > PQ_QUERY_PARAM_MAX_LIMIT)
+	{
+		libpq_append_conn_error(conn, "number of parameters must be between 0 and %d",
+								PQ_QUERY_PARAM_MAX_LIMIT);
+		return 0;
+	}
+
 	if (cursorOptions != 0 && !conn->protocol_cursor_enabled)
 	{
 		libpq_append_conn_error(conn,
