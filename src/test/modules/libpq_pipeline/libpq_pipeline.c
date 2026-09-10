@@ -2514,6 +2514,80 @@ test_cursor_bind_dml(PGconn *conn)
 /*
  * Test client-side validation of cursor bind options.
  */
+/*
+ * Bind outside pipeline mode, expecting a server error.
+ */
+static void
+expect_bind_rejected(PGconn *conn, const char *stmt, int cursorOptions,
+					 const char *what)
+{
+	if (PQsendBindWithCursorOptions(conn, stmt, 0, NULL, NULL, NULL, 0,
+									"rejected_portal", cursorOptions) != 1)
+		pg_fatal("%s: PQsendBindWithCursorOptions failed: %s",
+				 what, PQerrorMessage(conn));
+	consume_result_status(conn, PGRES_FATAL_ERROR);
+	consume_null_result(conn);
+}
+
+/*
+ * WITH HOLD is only allowed for a single SELECT.
+ */
+static void
+test_cursor_bind_hold_non_select(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_bind_hold_non_select... ");
+
+	res = PQexec(conn, "CREATE TEMP TABLE holdns_test(id int)");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("CREATE TABLE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQprepare(conn, "holdns_returning",
+					"INSERT INTO holdns_test VALUES (1) RETURNING id", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQprepare(conn, "holdns_update",
+					"UPDATE holdns_test SET id = id", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQprepare(conn, "holdns_utility", "SHOW work_mem", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQprepare(conn, "holdns_modcte",
+					"WITH t AS (INSERT INTO holdns_test VALUES (2) RETURNING id) SELECT id FROM t",
+					0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	expect_bind_rejected(conn, "holdns_returning", PQ_BIND_CURSOR_HOLD,
+						 "HOLD on INSERT RETURNING");
+	expect_bind_rejected(conn, "holdns_update", PQ_BIND_CURSOR_HOLD,
+						 "HOLD on UPDATE");
+	expect_bind_rejected(conn, "holdns_utility", PQ_BIND_CURSOR_HOLD,
+						 "HOLD on SHOW");
+	expect_bind_rejected(conn, "holdns_modcte", PQ_BIND_CURSOR_HOLD,
+						 "HOLD on SELECT with data-modifying CTE");
+
+	/* nothing was inserted */
+	res = PQexec(conn, "SELECT count(*) FROM holdns_test");
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		pg_fatal("SELECT failed: %s", PQerrorMessage(conn));
+	if (strcmp(PQgetvalue(res, 0, 0), "0") != 0)
+		pg_fatal("expected 0 rows, got %s", PQgetvalue(res, 0, 0));
+	PQclear(res);
+
+	fprintf(stderr, "ok\n");
+}
+
 static void
 test_cursor_bind_validation(PGconn *conn)
 {
@@ -3058,6 +3132,7 @@ print_test_list(void)
 {
 	printf("cancel\n");
 	printf("cursor_bind_dml\n");
+	printf("cursor_bind_hold_non_select\n");
 	printf("cursor_bind_holdable\n");
 	printf("cursor_bind_holdable_scroll\n");
 	printf("cursor_bind_no_scroll\n");
@@ -3178,6 +3253,8 @@ main(int argc, char **argv)
 		test_cancel(conn);
 	else if (strcmp(testname, "cursor_bind_dml") == 0)
 		test_cursor_bind_dml(conn);
+	else if (strcmp(testname, "cursor_bind_hold_non_select") == 0)
+		test_cursor_bind_hold_non_select(conn);
 	else if (strcmp(testname, "cursor_bind_holdable") == 0)
 		test_cursor_bind_holdable(conn);
 	else if (strcmp(testname, "cursor_bind_holdable_scroll") == 0)

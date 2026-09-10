@@ -353,7 +353,9 @@
          <member><literal>0x0004</literal> &mdash; WITH HOLD</member>
         </simplelist>
         SCROLL and NO SCROLL are mutually exclusive.
-        WITH HOLD is not permitted on unnamed portals.
+        WITH HOLD is not permitted on unnamed portals, and only for a
+        single <command>SELECT</command>, as for
+        <link linkend="sql-declare"><command>DECLARE</command></link>.
         All other bits are reserved and must be zero.
         A portal is scrollable only if SCROLL is requested, so NO SCROLL is
         accepted but never necessary.  A value of 0 requests no cursor options

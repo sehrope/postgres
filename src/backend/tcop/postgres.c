@@ -1682,6 +1682,7 @@ exec_bind_message(StringInfo input_message)
 	ParamsErrorCbData params_data;
 	ErrorContextCallback params_errcxt;
 	ListCell   *lc;
+	int			bind_ext_flags = 0;
 
 	/* Get the fixed part of the message */
 	portal_name = pq_getmsgstring(input_message);
@@ -2059,8 +2060,6 @@ exec_bind_message(StringInfo input_message)
 	 */
 	if (MyProcPort != NULL && MyProcPort->protocol_cursor_enabled)
 	{
-		int			bind_ext_flags;
-
 		bind_ext_flags = pq_getmsgint(input_message, 4);
 
 		/* Reject any bits we don't recognize */
@@ -2109,6 +2108,19 @@ exec_bind_message(StringInfo input_message)
 	 * assigned to the Portal, so it will be released at portal destruction.
 	 */
 	cplan = GetCachedPlan(psrc, params, NULL, NULL);
+
+	/*
+	 * PersistHoldablePortal can only cope with a single SELECT, as for
+	 * DECLARE.  Release the plan before erroring out; nothing else would.
+	 */
+	if ((bind_ext_flags & PQ_BIND_CURSOR_HOLD) &&
+		ChoosePortalStrategy(cplan->stmt_list) != PORTAL_ONE_SELECT)
+	{
+		ReleaseCachedPlan(cplan, NULL);
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("WITH HOLD cursor option is only allowed for a SELECT statement")));
+	}
 
 	/*
 	 * Now we can define the portal.
