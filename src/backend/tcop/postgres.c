@@ -41,6 +41,7 @@
 #include "commands/prepare.h"
 #include "commands/repack.h"
 #include "common/pg_prng.h"
+#include "executor/executor.h"
 #include "jit/jit.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
@@ -1671,6 +1672,7 @@ exec_bind_message(StringInfo input_message)
 	int16	   *rformats = NULL;
 	CachedPlanSource *psrc;
 	CachedPlan *cplan;
+	List	   *stmt_list;
 	Portal		portal;
 	char	   *query_string;
 	char	   *saved_stmt_name;
@@ -2108,6 +2110,7 @@ exec_bind_message(StringInfo input_message)
 	 * assigned to the Portal, so it will be released at portal destruction.
 	 */
 	cplan = GetCachedPlan(psrc, params, NULL, NULL);
+	stmt_list = cplan->stmt_list;
 
 	/*
 	 * DECLARE CURSOR's restrictions on SCROLL and WITH HOLD depend on the
@@ -2149,19 +2152,54 @@ exec_bind_message(StringInfo input_message)
 						 errdetail("Scrollable cursors must be READ ONLY.")));
 			}
 		}
+
+		/*
+		 * SCROLL starts the executor with EXEC_FLAG_BACKWARD, which only a
+		 * plan built with CURSOR_OPT_SCROLL is sure to support: the planner
+		 * then materializes anything that cannot scan backwards, and without
+		 * CURSOR_OPT_PARALLEL_OK there is no Gather.  The cached plan was
+		 * built without either, so if it is not usable as is, plan afresh as
+		 * PerformCursorOpen does and give the portal the plan outright.
+		 */
+		if ((bind_ext_flags & PQ_BIND_CURSOR_SCROLL) &&
+			strategy == PORTAL_ONE_SELECT)
+		{
+			PlannedStmt *pstmt = linitial_node(PlannedStmt, cplan->stmt_list);
+
+			if (pstmt->parallelModeNeeded ||
+				!ExecSupportsBackwardScan(pstmt->planTree))
+			{
+				int			cursor_options;
+
+				ReleaseCachedPlan(cplan, NULL);
+				cplan = NULL;
+
+				cursor_options = (psrc->cursor_options & ~CURSOR_OPT_PARALLEL_OK) |
+					CURSOR_OPT_SCROLL;
+				stmt_list = pg_plan_queries(copyObject(psrc->query_list),
+											psrc->query_string,
+											cursor_options, params);
+
+				/* the portal owns it, so it goes in its context */
+				oldContext = MemoryContextSwitchTo(portal->portalContext);
+				stmt_list = copyObject(stmt_list);
+				MemoryContextSwitchTo(oldContext);
+			}
+		}
 	}
 
 	/*
 	 * Now we can define the portal.
 	 *
 	 * DO NOT put any code that could possibly throw an error between the
-	 * above GetCachedPlan call and here.
+	 * above GetCachedPlan call and here, except the checks above, which
+	 * release the plan first.
 	 */
 	PortalDefineQuery(portal,
 					  saved_stmt_name,
 					  query_string,
 					  psrc->commandTag,
-					  cplan->stmt_list,
+					  stmt_list,
 					  cplan);
 
 	/* Portal is defined, set the plan ID based on its contents. */

@@ -2639,6 +2639,173 @@ test_cursor_bind_hold_non_select(PGconn *conn)
 	fprintf(stderr, "ok\n");
 }
 
+/*
+ * Bind stmt as a SCROLL portal and read it in every direction.
+ */
+static void
+check_scroll_plan(PGconn *conn, const char *stmt, const char *what)
+{
+	PGresult   *res;
+	char		first[64];
+	char		portal[64];
+
+	snprintf(portal, sizeof(portal), "%s_portal", stmt);
+
+	if (PQsendBindWithCursorOptions(conn, stmt, 0, NULL, NULL, NULL, 0,
+									portal, PQ_BIND_CURSOR_SCROLL) != 1)
+		pg_fatal("%s: PQsendBindWithCursorOptions failed: %s",
+				 what, PQerrorMessage(conn));
+	res = confirm_result_status(conn, PGRES_COMMAND_OK);
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* forward 2, then backward 1 returns the first row either way */
+	if (PQsendExecutePortal(conn, portal, PQ_FETCH_FORWARD, 2) != 1)
+		pg_fatal("%s: forward fetch failed: %s", what, PQerrorMessage(conn));
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	if (PQntuples(res) < 1)
+		pg_fatal("%s: expected at least 1 row, got %d", what, PQntuples(res));
+	strlcpy(first, PQgetvalue(res, 0, 0), sizeof(first));
+	PQclear(res);
+	consume_null_result(conn);
+
+	if (PQsendExecutePortal(conn, portal, PQ_FETCH_BACKWARD, 1) != 1)
+		pg_fatal("%s: backward fetch failed: %s", what, PQerrorMessage(conn));
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	if (PQntuples(res) != 1)
+		pg_fatal("%s: expected 1 row from backward fetch, got %d",
+				 what, PQntuples(res));
+	if (strcmp(PQgetvalue(res, 0, 0), first) != 0)
+		pg_fatal("%s: expected \"%s\" from backward fetch, got \"%s\"",
+				 what, first, PQgetvalue(res, 0, 0));
+	PQclear(res);
+	consume_null_result(conn);
+
+	/* full forward pass; this is where a parallel plan broke */
+	if (PQsendExecutePortal(conn, portal, PQ_FETCH_FORWARD | PQ_FETCH_MOVE,
+							PQ_FETCH_ALL) != 1)
+		pg_fatal("%s: move failed: %s", what, PQerrorMessage(conn));
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	if (PQntuples(res) != 0)
+		pg_fatal("%s: expected no rows from move, got %d", what, PQntuples(res));
+	PQclear(res);
+	consume_null_result(conn);
+
+	if (PQsendExecutePortal(conn, portal, PQ_FETCH_BACKWARD, 1) != 1)
+		pg_fatal("%s: backward fetch failed: %s", what, PQerrorMessage(conn));
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	if (PQntuples(res) != 1)
+		pg_fatal("%s: expected 1 row from backward fetch at end, got %d",
+				 what, PQntuples(res));
+	PQclear(res);
+	consume_null_result(conn);
+
+	if (PQsendExecutePortal(conn, portal, PQ_FETCH_ABSOLUTE, 1) != 1)
+		pg_fatal("%s: absolute fetch failed: %s", what, PQerrorMessage(conn));
+	res = confirm_result_status(conn, PGRES_TUPLES_OK);
+	if (PQntuples(res) != 1)
+		pg_fatal("%s: expected 1 row from absolute fetch, got %d",
+				 what, PQntuples(res));
+	if (strcmp(PQgetvalue(res, 0, 0), first) != 0)
+		pg_fatal("%s: expected \"%s\" from absolute fetch, got \"%s\"",
+				 what, first, PQgetvalue(res, 0, 0));
+	PQclear(res);
+	consume_null_result(conn);
+
+	if (PQsendClosePortal(conn, portal) != 1)
+		pg_fatal("%s: PQsendClosePortal failed: %s", what, PQerrorMessage(conn));
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+}
+
+/*
+ * SCROLL on plans that need replanning: hash join, aggregate, parallel.
+ */
+static void
+test_cursor_bind_scroll_plans(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_bind_scroll_plans... ");
+
+	res = PQexec(conn, "BEGIN");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("BEGIN failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQexec(conn, "SET enable_nestloop = off; SET enable_mergejoin = off");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("SET failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQprepare(conn, "scrollplan_hashjoin",
+					"SELECT a.g FROM generate_series(1, 5) a(g) "
+					"JOIN generate_series(1, 5) b(g) USING (g)", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+	check_scroll_plan(conn, "scrollplan_hashjoin", "hash join");
+
+	res = PQprepare(conn, "scrollplan_agg",
+					"SELECT count(*) FROM generate_series(1, 5)", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+	check_scroll_plan(conn, "scrollplan_agg", "aggregate");
+
+	res = PQexec(conn, "SET debug_parallel_query = on");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("SET failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQprepare(conn, "scrollplan_parallel",
+					"SELECT g FROM generate_series(1, 5) g", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+	check_scroll_plan(conn, "scrollplan_parallel", "parallel");
+
+	res = PQexec(conn, "ROLLBACK");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("ROLLBACK failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	/* HOLD over a replanned plan survives commit */
+	res = PQexec(conn, "BEGIN");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("BEGIN failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	if (PQsendBindAndExecutePortal(conn, "scrollplan_hashjoin", 0, NULL, NULL,
+								   NULL, 0, "scrollplan_hold",
+								   PQ_BIND_CURSOR_SCROLL | PQ_BIND_CURSOR_HOLD,
+								   PQ_FETCH_FORWARD, 2) != 1)
+		pg_fatal("PQsendBindAndExecutePortal failed: %s", PQerrorMessage(conn));
+	confirm_fetch_result(conn, "hold+scroll before commit", 2, -1);
+
+	res = PQexec(conn, "COMMIT");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("COMMIT failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	if (PQsendExecutePortal(conn, "scrollplan_hold", PQ_FETCH_BACKWARD,
+							PQ_FETCH_ALL) != 1)
+		pg_fatal("backward fetch failed: %s", PQerrorMessage(conn));
+	confirm_fetch_result(conn, "hold+scroll after commit", 1, -1);
+
+	if (PQsendExecutePortal(conn, "scrollplan_hold", PQ_FETCH_FORWARD,
+							PQ_FETCH_ALL) != 1)
+		pg_fatal("forward fetch failed: %s", PQerrorMessage(conn));
+	confirm_fetch_result(conn, "hold+scroll forward all", 5, -1);
+
+	if (PQsendClosePortal(conn, "scrollplan_hold") != 1)
+		pg_fatal("PQsendClosePortal failed: %s", PQerrorMessage(conn));
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+
+	fprintf(stderr, "ok\n");
+}
+
 static void
 test_cursor_bind_validation(PGconn *conn)
 {
@@ -3189,6 +3356,7 @@ print_test_list(void)
 	printf("cursor_bind_holdable_scroll\n");
 	printf("cursor_bind_no_scroll\n");
 	printf("cursor_bind_scroll\n");
+	printf("cursor_bind_scroll_plans\n");
 	printf("cursor_bind_validation\n");
 	printf("cursor_bind_without_extension\n");
 	printf("cursor_execute_bind_and_fetch\n");
@@ -3317,6 +3485,8 @@ main(int argc, char **argv)
 		test_cursor_bind_no_scroll(conn);
 	else if (strcmp(testname, "cursor_bind_scroll") == 0)
 		test_cursor_bind_scroll(conn);
+	else if (strcmp(testname, "cursor_bind_scroll_plans") == 0)
+		test_cursor_bind_scroll_plans(conn);
 	else if (strcmp(testname, "cursor_bind_validation") == 0)
 		test_cursor_bind_validation(conn);
 	else if (strcmp(testname, "cursor_bind_without_extension") == 0)

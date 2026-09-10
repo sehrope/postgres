@@ -360,7 +360,9 @@
         <literal>FOR UPDATE</literal> or <literal>FOR SHARE</literal>.
         All other bits are reserved and must be zero.
         A portal is scrollable only if SCROLL is requested, so NO SCROLL is
-        accepted but never necessary.  A value of 0 requests no cursor options
+        accepted but never necessary.  SCROLL may cause the
+        statement to be replanned when its cached plan cannot be read
+        backwards.  A value of 0 requests no cursor options
         at all, and creates exactly the portal that a Bind message without this
         extension would create.
        </para>
