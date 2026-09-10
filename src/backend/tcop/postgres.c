@@ -2292,15 +2292,22 @@ fetch_count_wire_to_long(int64 count)
 	if (count == PQ_FETCH_ALL)
 		return FETCH_ALL;		/* == LONG_MAX */
 
+	/* DoPortalRunFetch negates negative counts; reject the one that overflows */
+	if (count == PG_INT64_MIN)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("fetch count out of range")));
+
 	/*
 	 * The wire count is a full 64-bit integer, but "long" is only 32 bits
 	 * where SIZEOF_LONG < 8 (LLP64 Windows, ILP32 platforms).  There, a value
 	 * that does not fit would be silently truncated by the cast below, so
-	 * reject it instead.  Where "long" is 64 bits this test is always false,
-	 * so compile it out rather than emit a tautological comparison.
+	 * reject it instead, along with LONG_MIN itself for the reason above.
+	 * Where "long" is 64 bits this test is always false, so compile it out
+	 * rather than emit a tautological comparison.
 	 */
 #if SIZEOF_LONG < 8
-	if (count > LONG_MAX || count < LONG_MIN)
+	if (count > LONG_MAX || count <= LONG_MIN)
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 				 errmsg("fetch count out of range for this platform")));

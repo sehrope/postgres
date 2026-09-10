@@ -5255,7 +5255,8 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
          Number of rows to fetch, interpreted as the count of the
          <link linkend="sql-fetch"><command>FETCH</command></link> command
          of the same direction would be.  The largest positive value
-         (<literal>0x7FFFFFFFFFFFFFFF</literal>) means <literal>ALL</literal>.
+         (<literal>0x7FFFFFFFFFFFFFFF</literal>) means <literal>ALL</literal>;
+         the most negative value is not allowed.
          This field must be zero if the fetch flags are 0.
         </para>
        </listitem>

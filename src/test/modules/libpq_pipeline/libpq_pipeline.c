@@ -3292,6 +3292,29 @@ test_cursor_execute_validation(PGconn *conn)
 	if (PQexitPipelineMode(conn) != 1)
 		pg_fatal("failed to exit pipeline mode: %s", PQerrorMessage(conn));
 
+	/* INT64_MIN is rejected by the server */
+	res = PQexec(conn, "BEGIN");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("BEGIN failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	if (PQsendBindWithCursorOptions(conn, "exvalstmt", 0, NULL, NULL, NULL, 0,
+									"exvalportal", PQ_BIND_CURSOR_SCROLL) != 1)
+		pg_fatal("PQsendBindWithCursorOptions failed: %s", PQerrorMessage(conn));
+	consume_result_status(conn, PGRES_COMMAND_OK);
+	consume_null_result(conn);
+
+	if (PQsendExecutePortal(conn, "exvalportal", PQ_FETCH_FORWARD,
+							INT64_MIN) != 1)
+		pg_fatal("PQsendExecutePortal failed: %s", PQerrorMessage(conn));
+	consume_result_status(conn, PGRES_FATAL_ERROR);
+	consume_null_result(conn);
+
+	res = PQexec(conn, "ROLLBACK");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("ROLLBACK failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
 	fprintf(stderr, "ok\n");
 }
 
