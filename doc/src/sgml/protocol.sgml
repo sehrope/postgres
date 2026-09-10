@@ -356,6 +356,8 @@
         WITH HOLD is not permitted on unnamed portals, and only for a
         single <command>SELECT</command>, as for
         <link linkend="sql-declare"><command>DECLARE</command></link>.
+        Neither SCROLL nor WITH HOLD is permitted with
+        <literal>FOR UPDATE</literal> or <literal>FOR SHARE</literal>.
         All other bits are reserved and must be zero.
         A portal is scrollable only if SCROLL is requested, so NO SCROLL is
         accepted but never necessary.  A value of 0 requests no cursor options

@@ -24,6 +24,8 @@
 
 
 static void exit_nicely(PGconn *conn);
+static void confirm_fetch_result(PGconn *conn, const char *what, int nrows,
+								 int firstvalue);
 pg_noreturn static void pg_fatal_impl(int line, const char *fmt, ...)
 			pg_attribute_printf(2, 3);
 static bool process_result(PGconn *conn, PGresult *res, int results,
@@ -2530,6 +2532,55 @@ expect_bind_rejected(PGconn *conn, const char *stmt, int cursorOptions,
 }
 
 /*
+ * SCROLL and WITH HOLD are rejected with FOR UPDATE/SHARE; NO SCROLL is
+ * fine.
+ */
+static void
+test_cursor_bind_for_update(PGconn *conn)
+{
+	PGresult   *res;
+
+	fprintf(stderr, "test_cursor_bind_for_update... ");
+
+	res = PQexec(conn, "CREATE TEMP TABLE forupd_test AS SELECT generate_series(1, 3) AS id");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("CREATE TABLE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	res = PQprepare(conn, "forupd_stmt",
+					"SELECT id FROM forupd_test ORDER BY id FOR UPDATE", 0, NULL);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("PREPARE failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	expect_bind_rejected(conn, "forupd_stmt", PQ_BIND_CURSOR_SCROLL,
+						 "SCROLL with FOR UPDATE");
+	expect_bind_rejected(conn, "forupd_stmt", PQ_BIND_CURSOR_HOLD,
+						 "HOLD with FOR UPDATE");
+	expect_bind_rejected(conn, "forupd_stmt",
+						 PQ_BIND_CURSOR_HOLD | PQ_BIND_CURSOR_SCROLL,
+						 "HOLD | SCROLL with FOR UPDATE");
+
+	res = PQexec(conn, "BEGIN");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("BEGIN failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	if (PQsendBindAndExecutePortal(conn, "forupd_stmt", 0, NULL, NULL, NULL, 0,
+								   "forupd_portal", PQ_BIND_CURSOR_NO_SCROLL,
+								   PQ_FETCH_FORWARD, 2) != 1)
+		pg_fatal("PQsendBindAndExecutePortal failed: %s", PQerrorMessage(conn));
+	confirm_fetch_result(conn, "NO SCROLL with FOR UPDATE", 2, 1);
+
+	res = PQexec(conn, "ROLLBACK");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		pg_fatal("ROLLBACK failed: %s", PQerrorMessage(conn));
+	PQclear(res);
+
+	fprintf(stderr, "ok\n");
+}
+
+/*
  * WITH HOLD is only allowed for a single SELECT.
  */
 static void
@@ -3132,6 +3183,7 @@ print_test_list(void)
 {
 	printf("cancel\n");
 	printf("cursor_bind_dml\n");
+	printf("cursor_bind_for_update\n");
 	printf("cursor_bind_hold_non_select\n");
 	printf("cursor_bind_holdable\n");
 	printf("cursor_bind_holdable_scroll\n");
@@ -3253,6 +3305,8 @@ main(int argc, char **argv)
 		test_cancel(conn);
 	else if (strcmp(testname, "cursor_bind_dml") == 0)
 		test_cursor_bind_dml(conn);
+	else if (strcmp(testname, "cursor_bind_for_update") == 0)
+		test_cursor_bind_for_update(conn);
 	else if (strcmp(testname, "cursor_bind_hold_non_select") == 0)
 		test_cursor_bind_hold_non_select(conn);
 	else if (strcmp(testname, "cursor_bind_holdable") == 0)

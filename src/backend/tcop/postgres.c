@@ -2110,16 +2110,45 @@ exec_bind_message(StringInfo input_message)
 	cplan = GetCachedPlan(psrc, params, NULL, NULL);
 
 	/*
-	 * PersistHoldablePortal can only cope with a single SELECT, as for
-	 * DECLARE.  Release the plan before erroring out; nothing else would.
+	 * DECLARE CURSOR's restrictions on SCROLL and WITH HOLD depend on the
+	 * planned statement, so check them here.  Release the plan before
+	 * erroring out; nothing else would.
 	 */
-	if ((bind_ext_flags & PQ_BIND_CURSOR_HOLD) &&
-		ChoosePortalStrategy(cplan->stmt_list) != PORTAL_ONE_SELECT)
+	if (bind_ext_flags & (PQ_BIND_CURSOR_SCROLL | PQ_BIND_CURSOR_HOLD))
 	{
-		ReleaseCachedPlan(cplan, NULL);
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("WITH HOLD cursor option is only allowed for a SELECT statement")));
+		PortalStrategy strategy = ChoosePortalStrategy(cplan->stmt_list);
+
+		/* PersistHoldablePortal can only cope with a single SELECT */
+		if ((bind_ext_flags & PQ_BIND_CURSOR_HOLD) &&
+			strategy != PORTAL_ONE_SELECT)
+		{
+			ReleaseCachedPlan(cplan, NULL);
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("WITH HOLD cursor option is only allowed for a SELECT statement")));
+		}
+
+		/* FOR UPDATE/SHARE, as in transformDeclareCursorStmt */
+		if (strategy == PORTAL_ONE_SELECT &&
+			linitial_node(PlannedStmt, cplan->stmt_list)->rowMarks != NIL)
+		{
+			if (bind_ext_flags & PQ_BIND_CURSOR_HOLD)
+			{
+				ReleaseCachedPlan(cplan, NULL);
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("WITH HOLD cursor option is not supported with FOR UPDATE/SHARE"),
+						 errdetail("Holdable cursors must be READ ONLY.")));
+			}
+			if (bind_ext_flags & PQ_BIND_CURSOR_SCROLL)
+			{
+				ReleaseCachedPlan(cplan, NULL);
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("SCROLL cursor option is not supported with FOR UPDATE/SHARE"),
+						 errdetail("Scrollable cursors must be READ ONLY.")));
+			}
+		}
 	}
 
 	/*
