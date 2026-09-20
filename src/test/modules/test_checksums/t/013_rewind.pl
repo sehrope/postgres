@@ -101,6 +101,20 @@ my ($stdout, $stderr) = run_command([ 'pg_controldata', $node_a->data_dir ]);
 $stdout =~ /^Latest checkpoint location:\s*([0-9A-F\/]+)$/m
   or die "checkpoint location missing from pg_controldata output";
 my $shutdown_ckpt = $1;
+
+# Check this before the rewind: here the record is the last one A
+# wrote and is certainly still in its WAL.
+command_like(
+	[
+		'pg_waldump',
+		'-p' => $node_a->data_dir . '/pg_wal',
+		'-t' => 1,
+		'-s' => $shutdown_ckpt,
+		'-n' => 1,
+	],
+	qr/CHECKPOINT_SHUTDOWN/,
+	'last common checkpoint is a shutdown checkpoint');
+
 $node_b->poll_query_until('postgres',
 	"SELECT pg_last_wal_replay_lsn() > '$shutdown_ckpt'::pg_lsn;")
   or die "standby never replayed the shutdown checkpoint";
@@ -149,17 +163,6 @@ my $backup_label = slurp_file($node_a->data_dir . '/backup_label');
 $backup_label =~ /^CHECKPOINT LOCATION: ([0-9A-F\/]+)$/m
   or die "checkpoint location missing from backup_label";
 is($1, $shutdown_ckpt, 'replay starts at the switchover checkpoint');
-
-($stdout, $stderr) = run_command(
-	[
-		'pg_waldump',
-		'-p' => $node_a->data_dir . '/pg_wal',
-		'-t' => 1,
-		'-s' => $shutdown_ckpt,
-		'-n' => 1,
-	]);
-like($stdout, qr/CHECKPOINT_SHUTDOWN/,
-	'last common checkpoint is a shutdown checkpoint');
 
 # pg_rewind keeps the target's own checksum state in the control file it
 # writes; the online enable reaches the rewound node through WAL replay
