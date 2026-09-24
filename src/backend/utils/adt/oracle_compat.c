@@ -144,28 +144,80 @@ casefold(PG_FUNCTION_ARGS)
 
 
 /*
+ * Write count copies of the srclen-byte string src to dst and return a
+ * pointer past the last byte written.
+ *
+ * The first copy is written with memcpy(), then the region written so far
+ * is copied onto its own end, doubling it each time, so the number of
+ * memcpy() calls is logarithmic in count.  The caller must have checked
+ * that count * srclen bytes fit in dst.
+ */
+static char *
+repeat_bytes(char *dst, const char *src, int srclen, int count)
+{
+	Size		total = (Size) srclen * count;
+	Size		written;
+
+	if (srclen == 0 || total == 0)
+		return dst;
+	Assert(srclen > 0 && count > 0);
+
+	memcpy(dst, src, srclen);
+	written = srclen;
+	while (written < total)
+	{
+		Size		n = Min(written, total - written);
+
+		memcpy(dst + written, dst, n);
+		written += n;
+	}
+
+	return dst + total;
+}
+
+/*
  * Append m characters of the padding string pad (padlen bytes) to dst,
  * cycling through pad as needed, and return a pointer past the last byte
  * written.
+ *
+ * The pad string is validated with pg_mblen_range() only as far as it is
+ * used, so an incomplete multibyte character at its end is an error only
+ * if the padding reaches it.
  */
 static char *
 append_padding(char *dst, const char *pad, int padlen, int m)
 {
 	const char *p = pad;
 	const char *pend = pad + padlen;
+	int			nchars = 0;
+	int			nrep;
+	int			tail;
 
-	while (m--)
+	if (m <= 0)
+		return dst;
+
+	/* count the characters of one repetition, stopping at m */
+	while (p < pend && nchars < m)
 	{
-		int			mlen = pg_mblen_range(p, pend);
-
-		memcpy(dst, p, mlen);
-		dst += mlen;
-		p += mlen;
-		if (p == pend)			/* wrap around at end of pad */
-			p = pad;
+		p += pg_mblen_range(p, pend);
+		nchars++;
 	}
 
-	return dst;
+	/* whole repetitions only if the pad string was counted to its end */
+	nrep = (p == pend) ? m / nchars : 0;
+	dst = repeat_bytes(dst, pad, padlen, nrep);
+
+	/*
+	 * The partial final repetition is the first m % nchars characters of pad,
+	 * which were validated above, so measure them with the unbounded variant
+	 * and copy them as bytes.
+	 */
+	p = pad;
+	for (tail = m - nrep * nchars; tail > 0; tail--)
+		p += pg_mblen_unbounded(p);
+	memcpy(dst, pad, p - pad);
+
+	return dst + (p - pad);
 }
 
 /********************************************************************
