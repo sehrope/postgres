@@ -3467,6 +3467,19 @@ SELECT lpad('hi', 3, 'abc'), rpad('hi', 3, 'abc');
  ahi  | hia
 (1 row)
 
+-- repeat: one, several and five copies, and empty results
+SELECT repeat('abc', 1), repeat('abc', 2), repeat('ab', 5);
+ repeat | repeat |   repeat   
+--------+--------+------------
+ abc    | abcabc | ababababab
+(1 row)
+
+SELECT repeat('abc', 0), repeat('', 5), repeat('abc', -1);
+ repeat | repeat | repeat 
+--------+--------+--------
+        |        | 
+(1 row)
+
 SELECT ltrim('zzzytrim', 'xyz');
  ltrim 
 -------
