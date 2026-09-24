@@ -1172,6 +1172,10 @@ SELECT lpad('hi', 9, 'abc'), rpad('hi', 9, 'abc');
 SELECT lpad('hi', 12, 'ab'), rpad('hi', 12, 'ab');
 SELECT lpad('hi', 3, 'abc'), rpad('hi', 3, 'abc');
 
+-- repeat: one, several and five copies, and empty results
+SELECT repeat('abc', 1), repeat('abc', 2), repeat('ab', 5);
+SELECT repeat('abc', 0), repeat('', 5), repeat('abc', -1);
+
 SELECT ltrim('zzzytrim', 'xyz');
 
 SELECT translate('', '14', 'ax');
